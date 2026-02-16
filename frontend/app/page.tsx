@@ -1,6 +1,7 @@
 'use client';
 
 import { FormEvent, useEffect, useMemo, useState } from 'react';
+import Link from 'next/link';
 import {
   DigestThread,
   Persona,
@@ -532,6 +533,9 @@ export default function HomePage() {
           <p>Interest room: {selectedRoom?.name || 'Select a room'}</p>
         </div>
         <div className="header-actions">
+          <Link className="cta-link" href="/templates">
+            Templates
+          </Link>
           <button className="secondary" onClick={onSharePersona} disabled={loading || !selectedPersonaId}>
             Share
           </button>

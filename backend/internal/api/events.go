@@ -17,8 +17,12 @@ const (
 	eventBattleCreated       = "battle_created"
 	eventBattleShared        = "battle_shared"
 	eventPublicProfileViewed = "public_profile_viewed"
+	eventPublicBattleViewed  = "public_battle_viewed"
 	eventSignupFromShare     = "signup_from_share"
-	eventRemixClick          = "remix_click"
+	eventRemixClick          = "remix_click" // kept for backward compatibility
+	eventRemixClicked        = "remix_clicked"
+	eventRemixStarted        = "remix_started"
+	eventRemixCompleted      = "remix_completed"
 	eventFollowClick         = "follow_click"
 )
 
@@ -31,19 +35,27 @@ var (
 		eventBattleCreated:       {},
 		eventBattleShared:        {},
 		eventPublicProfileViewed: {},
+		eventPublicBattleViewed:  {},
 		eventSignupFromShare:     {},
 		eventRemixClick:          {},
+		eventRemixClicked:        {},
+		eventRemixStarted:        {},
+		eventRemixCompleted:      {},
 		eventFollowClick:         {},
 	}
 	analyticsSummaryEvents = []string{
 		eventBattleShared,
 		eventPublicProfileViewed,
+		eventPublicBattleViewed,
 		eventSignupFromShare,
 		eventPersonaCreated,
 		eventPreviewGenerated,
 		eventPostApproved,
 		eventBattleCreated,
 		eventRemixClick,
+		eventRemixClicked,
+		eventRemixStarted,
+		eventRemixCompleted,
 		eventFollowClick,
 	}
 )
@@ -161,6 +173,12 @@ func (s *Server) handleAnalyticsSummary(w http.ResponseWriter, r *http.Request) 
 			"signup":  last7d[eventSignupFromShare],
 			"persona": last7d[eventPersonaCreated],
 			"battle":  last7d[eventBattleCreated],
+		},
+		"remix_funnel_7d": map[string]int{
+			"public_views":    last7d[eventPublicBattleViewed],
+			"remix_clicked":   last7d[eventRemixClicked],
+			"remix_started":   last7d[eventRemixStarted],
+			"remix_completed": last7d[eventRemixCompleted],
 		},
 	})
 }

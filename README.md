@@ -173,14 +173,19 @@ Useful env options:
 - `GET /p/:slug/posts?cursor=<CURSOR>`
 - `POST /p/:slug/follow` (`401` + `signup_required` when unauthenticated)
 - `GET /b/:id/card.png` (shareable battle image card, public)
+- `GET /b/:id/meta` (public battle metadata for share/remix page)
+- `POST /battles/:id/remix-intent` (public, short-lived remix payload + token)
+- `GET /templates` (public template marketplace list)
 
 ### Rooms/Posts/Replies (JWT required)
 - `GET /rooms`
 - `GET /rooms/:id/posts`
 - `POST /rooms/:id/posts/draft`
+- `POST /rooms/:id/battles` (create published battle, accepts `template_id`)
 - `POST /posts/:id/approve`
 - `POST /posts/:id/generate-replies`
 - `GET /posts/:id/thread`
+- `POST /templates` (create template)
 
 ## AI Provider
 `LLMClient` interface:
@@ -239,9 +244,25 @@ Providers:
 - Endpoint response is cached in-memory by `battle_id + updated_at`.
 - Frontend battle page (`/b/:id`) includes:
   - card preview thumbnail
+  - `Remix this battle` primary CTA
   - `Copy image`
   - `Share` (native share, fallback copy link)
   - `Copy link`
+
+## Remix + Templates Marketplace
+- `POST /battles/:id/remix-intent` returns:
+  - room and topic prefill
+  - suggested templates
+  - short-lived `remix_token` (signed)
+- `/b/:id` battle page now:
+  - opens remix modal with prefilled topic + pro/con stance styles
+  - persists remix intent through `/signup?next=/b/:id&remix=1`
+  - auto-resumes remix modal after auth
+- Template marketplace:
+  - `GET /templates` for public browsing
+  - `POST /templates` for user-created formats
+  - default public template: `Claim/Evidence 6 turns`
+- Battle creation now supports `template_id` via `POST /rooms/:id/battles`.
 
 ## Persona Calibration & Preview Voice
 - Persona create/edit accepts calibration fields and stores them in Postgres.

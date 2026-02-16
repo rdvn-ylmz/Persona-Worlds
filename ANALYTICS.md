@@ -13,6 +13,11 @@ Primary funnel (7-day trend):
 4. `persona` -> `persona_created`
 5. `battle` -> `battle_created`
 
+Remix funnel metric:
+
+- `remix_completed / public_views`
+- `public_views` maps to `public_battle_viewed`
+
 ## Tracked Events
 
 Core product events:
@@ -23,11 +28,16 @@ Core product events:
 - `battle_created`
 - `battle_shared`
 - `public_profile_viewed`
+- `public_battle_viewed`
 - `signup_from_share`
+- `remix_clicked`
+- `remix_started`
+- `remix_completed`
 
 Frontend interaction signals (via `POST /events`):
 
-- `remix_click`
+- `remix_click` (legacy)
+- `remix_clicked`
 - `follow_click`
 
 ## Data Model

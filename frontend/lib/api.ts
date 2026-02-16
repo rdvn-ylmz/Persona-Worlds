@@ -186,6 +186,68 @@ export type FollowPublicPersonaResponse = {
   followers: number;
 };
 
+export type Template = {
+  id: string;
+  owner_user_id?: string;
+  name: string;
+  prompt_rules: string;
+  turn_count: number;
+  word_limit: number;
+  created_at: string;
+  is_public: boolean;
+};
+
+export type RemixTemplateSummary = {
+  id: string;
+  name: string;
+  turn_count: number;
+  word_limit: number;
+};
+
+export type RemixIntentResponse = {
+  battle_id: string;
+  room_id: string;
+  room_name: string;
+  topic: string;
+  pro_style: string;
+  con_style: string;
+  suggested_templates: RemixTemplateSummary[];
+  remix_token: string;
+  remix_token_expires: string;
+};
+
+export type PublicBattleMeta = {
+  battle_id: string;
+  room_id: string;
+  room_name: string;
+  topic: string;
+  created_at: string;
+  template?: {
+    id: string;
+    name: string;
+  };
+  share_url: string;
+  card_url: string;
+};
+
+export type CreateBattlePayload = {
+  topic: string;
+  template_id?: string;
+  remix_token?: string;
+  pro_style?: string;
+  con_style?: string;
+};
+
+export type CreateBattleResponse = {
+  battle_id: string;
+  post: Post;
+  room_name: string;
+  template: Template;
+  enqueued_replies: number;
+  remix_used: boolean;
+  suggested_next_url: string;
+};
+
 export async function signup(email: string, password: string, shareSlug = '') {
   const normalizedShareSlug = shareSlug.trim();
   return request<{ token: string; user_id: string }>('/auth/signup', {
@@ -283,6 +345,39 @@ export async function followPublicPersona(slug: string, token?: string) {
   });
 }
 
+export async function getPublicBattleMeta(battleId: string) {
+  return request<PublicBattleMeta>(`/b/${encodeURIComponent(battleId)}/meta`);
+}
+
+export async function createBattleRemixIntent(battleId: string, token?: string) {
+  return request<RemixIntentResponse>(`/battles/${encodeURIComponent(battleId)}/remix-intent`, {
+    method: 'POST',
+    token,
+    body: {}
+  });
+}
+
+export async function listTemplates() {
+  return request<{ templates: Template[] }>('/templates');
+}
+
+export async function createTemplate(
+  token: string,
+  payload: {
+    name: string;
+    prompt_rules: string;
+    turn_count: number;
+    word_limit: number;
+    is_public: boolean;
+  }
+) {
+  return request<Template>('/templates', {
+    method: 'POST',
+    token,
+    body: payload
+  });
+}
+
 export async function listRooms(token: string) {
   return request<{ rooms: Room[] }>('/rooms', { token });
 }
@@ -296,6 +391,14 @@ export async function createDraft(token: string, roomId: string, personaId: stri
     method: 'POST',
     token,
     body: { persona_id: personaId }
+  });
+}
+
+export async function createBattle(token: string, roomId: string, payload: CreateBattlePayload) {
+  return request<CreateBattleResponse>(`/rooms/${roomId}/battles`, {
+    method: 'POST',
+    token,
+    body: payload
   });
 }
 

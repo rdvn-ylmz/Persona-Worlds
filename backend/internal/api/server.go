@@ -151,6 +151,17 @@ type PublicRoomStat struct {
 	PostCount int    `json:"post_count"`
 }
 
+type BattleTemplate struct {
+	ID          string    `json:"id"`
+	OwnerUserID string    `json:"owner_user_id,omitempty"`
+	Name        string    `json:"name"`
+	PromptRules string    `json:"prompt_rules"`
+	TurnCount   int       `json:"turn_count"`
+	WordLimit   int       `json:"word_limit"`
+	CreatedAt   time.Time `json:"created_at"`
+	IsPublic    bool      `json:"is_public"`
+}
+
 func New(cfg config.Config, db *pgxpool.Pool, llm ai.LLMClient) *Server {
 	return &Server{
 		cfg:                cfg,
@@ -266,6 +277,9 @@ func (s *Server) Router() http.Handler {
 	})
 
 	r.With(s.publicReadRateLimitMiddleware).Get("/b/{id}/card.png", s.handleGetBattleCardImage)
+	r.With(s.publicReadRateLimitMiddleware).Get("/b/{id}/meta", s.handleGetPublicBattleMeta)
+	r.With(s.publicReadRateLimitMiddleware).Post("/battles/{id}/remix-intent", s.handleCreateBattleRemixIntent)
+	r.With(s.publicReadRateLimitMiddleware).Get("/templates", s.handleListPublicTemplates)
 
 	r.Group(func(r chi.Router) {
 		r.Use(auth.Middleware(s.cfg.JWTSecret))
@@ -284,10 +298,12 @@ func (s *Server) Router() http.Handler {
 		r.Get("/rooms", s.handleListRooms)
 		r.Get("/rooms/{id}/posts", s.handleListRoomPosts)
 		r.Post("/rooms/{id}/posts/draft", s.handleCreateDraft)
+		r.Post("/rooms/{id}/battles", s.handleCreateBattle)
 		r.Post("/posts/{id}/approve", s.handleApprovePost)
 		r.Post("/posts/{id}/generate-replies", s.handleGenerateReplies)
 		r.Get("/posts/{id}/thread", s.handleGetThread)
 		r.Get("/b/{id}", s.handleGetThread)
+		r.Post("/templates", s.handleCreateTemplate)
 		r.Get("/admin/analytics/summary", s.handleAnalyticsSummary)
 	})
 

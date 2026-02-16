@@ -158,7 +158,7 @@ export default function PublicPersonaPage() {
   const onRemixClick = () => {
     const token = typeof window !== 'undefined' ? localStorage.getItem(TOKEN_KEY) || '' : '';
     void trackEvent(
-      'remix_click',
+      'remix_clicked',
       {
         slug: profile.slug,
         source: 'public_profile'
