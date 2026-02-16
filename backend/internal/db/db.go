@@ -6,6 +6,9 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
+	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -13,7 +16,19 @@ import (
 const migrationLockKey int64 = 82458324711
 
 func Connect(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
-	pool, err := pgxpool.New(ctx, databaseURL)
+	poolConfig, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		return nil, err
+	}
+	statementTimeout := statementTimeoutFromEnv()
+	if statementTimeout > 0 {
+		if poolConfig.ConnConfig.RuntimeParams == nil {
+			poolConfig.ConnConfig.RuntimeParams = map[string]string{}
+		}
+		poolConfig.ConnConfig.RuntimeParams["statement_timeout"] = strconv.FormatInt(statementTimeout.Milliseconds(), 10)
+	}
+
+	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
 	if err != nil {
 		return nil, err
 	}
@@ -22,6 +37,18 @@ func Connect(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
 		return nil, err
 	}
 	return pool, nil
+}
+
+func statementTimeoutFromEnv() time.Duration {
+	raw := strings.TrimSpace(os.Getenv("DB_QUERY_TIMEOUT"))
+	if raw == "" {
+		return 5 * time.Second
+	}
+	parsed, err := time.ParseDuration(raw)
+	if err != nil {
+		return 5 * time.Second
+	}
+	return parsed
 }
 
 func RunMigrations(ctx context.Context, pool *pgxpool.Pool, migrationsDir string) error {

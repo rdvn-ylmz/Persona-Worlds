@@ -41,24 +41,22 @@ func (w *Worker) Run(ctx context.Context) {
 	ticker := time.NewTicker(w.cfg.WorkerPollEvery)
 	defer ticker.Stop()
 
+	runTask := func(name string, fn func(context.Context) error) {
+		taskCtx, cancel := context.WithTimeout(ctx, w.cfg.WorkerTaskTimeout)
+		defer cancel()
+
+		if err := fn(taskCtx); err != nil {
+			w.logger.Error("worker_task_error", observability.Fields{
+				"task":  name,
+				"error": err.Error(),
+			})
+		}
+	}
+
 	for {
-		if err := w.generateDigestForOnePersona(ctx); err != nil {
-			w.logger.Error("worker_digest_process_error", observability.Fields{
-				"error": err.Error(),
-			})
-		}
-
-		if err := w.generateWeeklyDigestForOneUser(ctx); err != nil {
-			w.logger.Error("worker_weekly_digest_process_error", observability.Fields{
-				"error": err.Error(),
-			})
-		}
-
-		if err := w.processOne(ctx); err != nil {
-			w.logger.Error("worker_process_error", observability.Fields{
-				"error": err.Error(),
-			})
-		}
+		runTask("digest_daily", w.generateDigestForOnePersona)
+		runTask("digest_weekly", w.generateWeeklyDigestForOneUser)
+		runTask("jobs", w.processOne)
 
 		select {
 		case <-ctx.Done():

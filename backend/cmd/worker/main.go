@@ -45,7 +45,10 @@ func main() {
 	observabilityServer := &http.Server{
 		Addr:              ":" + cfg.WorkerObservabilityPort,
 		Handler:           w.ObservabilityHandler(),
-		ReadHeaderTimeout: 5 * time.Second,
+		ReadHeaderTimeout: cfg.APIReadTimeout,
+		ReadTimeout:       cfg.APIReadTimeout,
+		WriteTimeout:      cfg.APIWriteTimeout,
+		IdleTimeout:       cfg.APIIdleTimeout,
 	}
 	observabilityErrCh := make(chan error, 1)
 

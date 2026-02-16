@@ -46,7 +46,10 @@ func main() {
 	httpServer := &http.Server{
 		Addr:              ":" + cfg.Port,
 		Handler:           server.Router(),
-		ReadHeaderTimeout: 10 * time.Second,
+		ReadHeaderTimeout: cfg.APIReadTimeout,
+		ReadTimeout:       cfg.APIReadTimeout,
+		WriteTimeout:      cfg.APIWriteTimeout,
+		IdleTimeout:       cfg.APIIdleTimeout,
 	}
 	serverErrCh := make(chan error, 1)
 

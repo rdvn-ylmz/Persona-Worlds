@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"math/rand"
 	"net/http"
 	"personaworlds/backend/internal/ai/prompts"
 	"strings"
@@ -13,19 +15,38 @@ import (
 )
 
 type OpenAIClient struct {
-	apiKey  string
-	baseURL string
-	model   string
-	http    *http.Client
+	apiKey         string
+	baseURL        string
+	model          string
+	requestTimeout time.Duration
+	maxRetries     int
+	retryBase      time.Duration
+	http           *http.Client
 }
 
-func NewOpenAIClient(apiKey, baseURL, model string) *OpenAIClient {
+func NewOpenAIClient(apiKey, baseURL, model string, requestTimeout time.Duration, maxRetries int, retryBase time.Duration) *OpenAIClient {
+	if requestTimeout <= 0 {
+		requestTimeout = 20 * time.Second
+	}
+	if maxRetries < 0 {
+		maxRetries = 0
+	}
+	if maxRetries > 5 {
+		maxRetries = 5
+	}
+	if retryBase <= 0 {
+		retryBase = 400 * time.Millisecond
+	}
+
 	return &OpenAIClient{
-		apiKey:  apiKey,
-		baseURL: strings.TrimRight(baseURL, "/"),
-		model:   model,
+		apiKey:         apiKey,
+		baseURL:        strings.TrimRight(baseURL, "/"),
+		model:          model,
+		requestTimeout: requestTimeout,
+		maxRetries:     maxRetries,
+		retryBase:      retryBase,
 		http: &http.Client{
-			Timeout: 30 * time.Second,
+			Timeout: requestTimeout,
 		},
 	}
 }
@@ -116,6 +137,8 @@ func (c *OpenAIClient) chat(ctx context.Context, system, user string) (string, e
 	if c.apiKey == "" {
 		return "", errors.New("OPENAI_API_KEY is required for openai provider")
 	}
+	ctx, cancel := contextWithDefaultTimeout(ctx, c.requestTimeout)
+	defer cancel()
 
 	requestBody := map[string]any{
 		"model": c.model,
@@ -131,21 +154,57 @@ func (c *OpenAIClient) chat(ctx context.Context, system, user string) (string, e
 		return "", err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint(), bytes.NewReader(jsonBody))
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Authorization", "Bearer "+c.apiKey)
-	req.Header.Set("Content-Type", "application/json")
+	var lastErr error
+	for attempt := 0; attempt <= c.maxRetries; attempt++ {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint(), bytes.NewReader(jsonBody))
+		if err != nil {
+			return "", err
+		}
+		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+		req.Header.Set("Content-Type", "application/json")
 
+		content, retryable, err := c.chatOnce(req)
+		if err == nil {
+			return content, nil
+		}
+		lastErr = err
+		if !retryable || attempt >= c.maxRetries {
+			break
+		}
+
+		wait := retryDelay(c.retryBase, attempt)
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return "", ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return "", lastErr
+}
+
+func (c *OpenAIClient) chatOnce(req *http.Request) (string, bool, error) {
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return "", err
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return "", false, err
+		}
+		return "", true, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 400 {
-		return "", fmt.Errorf("openai provider error: status %d", resp.StatusCode)
+		bodySnippet, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		message := strings.TrimSpace(string(bodySnippet))
+		if message == "" {
+			message = fmt.Sprintf("status %d", resp.StatusCode)
+		}
+		err := fmt.Errorf("openai provider error: status=%d body=%s", resp.StatusCode, message)
+		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= http.StatusInternalServerError {
+			return "", true, err
+		}
+		return "", false, err
 	}
 
 	var out struct {
@@ -156,15 +215,41 @@ func (c *OpenAIClient) chat(ctx context.Context, system, user string) (string, e
 		} `json:"choices"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return "", err
+		return "", true, err
 	}
 	if len(out.Choices) == 0 {
-		return "", errors.New("openai provider returned no choices")
+		return "", true, errors.New("openai provider returned no choices")
 	}
 
 	content := strings.TrimSpace(out.Choices[0].Message.Content)
 	if content == "" {
-		return "", errors.New("openai provider returned empty content")
+		return "", true, errors.New("openai provider returned empty content")
 	}
-	return content, nil
+	return content, false, nil
+}
+
+func contextWithDefaultTimeout(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		return context.WithTimeout(context.Background(), timeout)
+	}
+	if _, hasDeadline := ctx.Deadline(); hasDeadline {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, timeout)
+}
+
+func retryDelay(base time.Duration, attempt int) time.Duration {
+	if base <= 0 {
+		base = 400 * time.Millisecond
+	}
+	if attempt < 0 {
+		attempt = 0
+	}
+	delay := base * time.Duration(1<<attempt)
+	jitterScale := 0.8 + (rand.Float64() * 0.4)
+	jittered := time.Duration(float64(delay) * jitterScale)
+	if jittered < 50*time.Millisecond {
+		return 50 * time.Millisecond
+	}
+	return jittered
 }
