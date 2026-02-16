@@ -1,0 +1,97 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: personaworlds-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: personaworlds
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: personaworlds-redis
+    ports:
+      - "6379:6379"
+    profiles: ["optional"]
+
+  backend:
+    build:
+      context: ./backend
+    container_name: personaworlds-backend
+    command: ["api"]
+    environment:
+      PORT: "8080"
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/personaworlds?sslmode=disable
+      JWT_SECRET: dev-secret
+      LLM_PROVIDER: mock
+      OPENAI_BASE_URL: https://api.openai.com
+      OPENAI_MODEL: gpt-4o-mini
+      MIGRATIONS_DIR: /app/migrations
+      FRONTEND_ORIGIN: http://localhost:3000
+      DRAFT_MAX_LEN: "500"
+      REPLY_MAX_LEN: "280"
+      SUMMARY_MAX_LEN: "400"
+      DEFAULT_DRAFT_QUOTA: "5"
+      DEFAULT_REPLY_QUOTA: "25"
+      WORKER_POLL_EVERY: 3s
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+
+  worker:
+    build:
+      context: ./backend
+    container_name: personaworlds-worker
+    command: ["worker"]
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/personaworlds?sslmode=disable
+      JWT_SECRET: dev-secret
+      LLM_PROVIDER: mock
+      OPENAI_BASE_URL: https://api.openai.com
+      OPENAI_MODEL: gpt-4o-mini
+      MIGRATIONS_DIR: /app/migrations
+      DRAFT_MAX_LEN: "500"
+      REPLY_MAX_LEN: "280"
+      SUMMARY_MAX_LEN: "400"
+      WORKER_POLL_EVERY: 3s
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  seed:
+    build:
+      context: ./backend
+    container_name: personaworlds-seed
+    command: ["seed"]
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/personaworlds?sslmode=disable
+      MIGRATIONS_DIR: /app/migrations
+    depends_on:
+      postgres:
+        condition: service_healthy
+    profiles: ["tools"]
+
+  frontend:
+    build:
+      context: ./frontend
+    container_name: personaworlds-frontend
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: http://localhost:8080
+    depends_on:
+      - backend
+    ports:
+      - "3000:3000"
+
+volumes:
+  pgdata:

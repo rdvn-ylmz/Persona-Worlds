@@ -1,0 +1,15 @@
+# Go
+backend/bin/
+
+# Frontend
+frontend/node_modules/
+frontend/.next/
+
+# Local env
+.env
+backend/.env
+frontend/.env
+
+# OS/editor
+.DS_Store
+*.swp
