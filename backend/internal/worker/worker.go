@@ -38,6 +38,10 @@ func (w *Worker) Run(ctx context.Context) {
 			log.Printf("worker digest process error: %v", err)
 		}
 
+		if err := w.generateWeeklyDigestForOneUser(ctx); err != nil {
+			log.Printf("worker weekly digest process error: %v", err)
+		}
+
 		if err := w.processOne(ctx); err != nil {
 			log.Printf("worker process error: %v", err)
 		}

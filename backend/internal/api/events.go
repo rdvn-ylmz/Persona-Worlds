@@ -11,37 +11,43 @@ import (
 )
 
 const (
-	eventPersonaCreated      = "persona_created"
-	eventPreviewGenerated    = "preview_generated"
-	eventPostApproved        = "post_approved"
-	eventBattleCreated       = "battle_created"
-	eventBattleShared        = "battle_shared"
-	eventPublicProfileViewed = "public_profile_viewed"
-	eventPublicBattleViewed  = "public_battle_viewed"
-	eventSignupFromShare     = "signup_from_share"
-	eventRemixClick          = "remix_click" // kept for backward compatibility
-	eventRemixClicked        = "remix_clicked"
-	eventRemixStarted        = "remix_started"
-	eventRemixCompleted      = "remix_completed"
-	eventFollowClick         = "follow_click"
+	eventPersonaCreated       = "persona_created"
+	eventPreviewGenerated     = "preview_generated"
+	eventPostApproved         = "post_approved"
+	eventBattleCreated        = "battle_created"
+	eventBattleShared         = "battle_shared"
+	eventPublicProfileViewed  = "public_profile_viewed"
+	eventPublicBattleViewed   = "public_battle_viewed"
+	eventSignupFromShare      = "signup_from_share"
+	eventRemixClick           = "remix_click" // kept for backward compatibility
+	eventRemixClicked         = "remix_clicked"
+	eventRemixStarted         = "remix_started"
+	eventRemixCompleted       = "remix_completed"
+	eventFollowClick          = "follow_click"
+	eventDailyReturn          = "daily_return"
+	eventNotificationClicked  = "notification_clicked"
+	eventTemplateUsedFromFeed = "template_used_from_feed"
 )
 
 var (
 	errUnsupportedEventName = errors.New("unsupported event_name")
 	supportedEventNames     = map[string]struct{}{
-		eventPersonaCreated:      {},
-		eventPreviewGenerated:    {},
-		eventPostApproved:        {},
-		eventBattleCreated:       {},
-		eventBattleShared:        {},
-		eventPublicProfileViewed: {},
-		eventPublicBattleViewed:  {},
-		eventSignupFromShare:     {},
-		eventRemixClick:          {},
-		eventRemixClicked:        {},
-		eventRemixStarted:        {},
-		eventRemixCompleted:      {},
-		eventFollowClick:         {},
+		eventPersonaCreated:       {},
+		eventPreviewGenerated:     {},
+		eventPostApproved:         {},
+		eventBattleCreated:        {},
+		eventBattleShared:         {},
+		eventPublicProfileViewed:  {},
+		eventPublicBattleViewed:   {},
+		eventSignupFromShare:      {},
+		eventRemixClick:           {},
+		eventRemixClicked:         {},
+		eventRemixStarted:         {},
+		eventRemixCompleted:       {},
+		eventFollowClick:          {},
+		eventDailyReturn:          {},
+		eventNotificationClicked:  {},
+		eventTemplateUsedFromFeed: {},
 	}
 	analyticsSummaryEvents = []string{
 		eventBattleShared,
@@ -57,6 +63,9 @@ var (
 		eventRemixStarted,
 		eventRemixCompleted,
 		eventFollowClick,
+		eventDailyReturn,
+		eventNotificationClicked,
+		eventTemplateUsedFromFeed,
 	}
 )
 
@@ -179,6 +188,11 @@ func (s *Server) handleAnalyticsSummary(w http.ResponseWriter, r *http.Request) 
 			"remix_clicked":   last7d[eventRemixClicked],
 			"remix_started":   last7d[eventRemixStarted],
 			"remix_completed": last7d[eventRemixCompleted],
+		},
+		"retention_7d": map[string]int{
+			"daily_return":            last7d[eventDailyReturn],
+			"notification_clicked":    last7d[eventNotificationClicked],
+			"template_used_from_feed": last7d[eventTemplateUsedFromFeed],
 		},
 	})
 }

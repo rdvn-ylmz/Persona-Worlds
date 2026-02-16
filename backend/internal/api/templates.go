@@ -272,6 +272,7 @@ func (s *Server) handleCreateBattle(w http.ResponseWriter, r *http.Request) {
 	proStyle := strings.TrimSpace(req.ProStyle)
 	conStyle := strings.TrimSpace(req.ConStyle)
 	remixUsed := false
+	sourceBattleID := ""
 
 	if strings.TrimSpace(req.RemixToken) != "" {
 		intent, err := parseRemixIntentToken(s.cfg.JWTSecret, req.RemixToken)
@@ -295,6 +296,7 @@ func (s *Server) handleCreateBattle(w http.ResponseWriter, r *http.Request) {
 		if conStyle == "" {
 			conStyle = strings.TrimSpace(intent.ConStyle)
 		}
+		sourceBattleID = strings.TrimSpace(intent.BattleID)
 		remixUsed = true
 	}
 
@@ -363,6 +365,11 @@ func (s *Server) handleCreateBattle(w http.ResponseWriter, r *http.Request) {
 
 	enqueuedReplies := s.enqueueBattleReplies(r.Context(), userID, out.ID, template)
 
+	_ = s.notifyTemplateUsed(r.Context(), userID, template, out.ID)
+	if remixUsed {
+		_ = s.notifyBattleRemixed(r.Context(), userID, sourceBattleID, out.ID)
+	}
+
 	_ = s.logEventFromRequest(r, eventBattleCreated, map[string]any{
 		"battle_id":   out.ID,
 		"room_id":     room.ID,
@@ -370,9 +377,10 @@ func (s *Server) handleCreateBattle(w http.ResponseWriter, r *http.Request) {
 	})
 	if remixUsed {
 		_ = s.logEventFromRequest(r, eventRemixCompleted, map[string]any{
-			"battle_id":   out.ID,
-			"room_id":     room.ID,
-			"template_id": template.ID,
+			"battle_id":        out.ID,
+			"source_battle_id": sourceBattleID,
+			"room_id":          room.ID,
+			"template_id":      template.ID,
 		})
 	}
 

@@ -284,6 +284,12 @@ func (s *Server) Router() http.Handler {
 	r.Group(func(r chi.Router) {
 		r.Use(auth.Middleware(s.cfg.JWTSecret))
 
+		r.Get("/feed", s.handleGetFeed)
+		r.Get("/notifications", s.handleListNotifications)
+		r.Post("/notifications/{id}/read", s.handleMarkNotificationRead)
+		r.Post("/notifications/read-all", s.handleMarkAllNotificationsRead)
+		r.Get("/digest/weekly", s.handleGetWeeklyDigest)
+
 		r.Get("/personas", s.handleListPersonas)
 		r.Post("/personas", s.handleCreatePersona)
 		r.Get("/personas/{id}", s.handleGetPersona)
@@ -527,6 +533,10 @@ func (s *Server) handleFollowPublicProfile(w http.ResponseWriter, r *http.Reques
 	`, profile.PersonaID).Scan(&followers); err != nil {
 		writeInternalError(w, "could not load followers")
 		return
+	}
+
+	if ct.RowsAffected() > 0 {
+		_ = s.notifyPersonaFollowed(r.Context(), ownerUserID, followerUserID, profile.PersonaID, slug)
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
