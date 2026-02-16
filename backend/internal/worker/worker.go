@@ -2,19 +2,21 @@ package worker
 
 import (
 	"context"
-	"log"
 	"time"
 
 	"personaworlds/backend/internal/ai"
 	"personaworlds/backend/internal/config"
+	"personaworlds/backend/internal/observability"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type Worker struct {
-	cfg config.Config
-	db  *pgxpool.Pool
-	llm ai.LLMClient
+	cfg     config.Config
+	db      *pgxpool.Pool
+	llm     ai.LLMClient
+	logger  *observability.Logger
+	metrics *observability.WorkerMetrics
 }
 
 type permanentError struct {
@@ -26,7 +28,13 @@ func (e permanentError) Error() string {
 }
 
 func New(cfg config.Config, db *pgxpool.Pool, llm ai.LLMClient) *Worker {
-	return &Worker{cfg: cfg, db: db, llm: llm}
+	return &Worker{
+		cfg:     cfg,
+		db:      db,
+		llm:     llm,
+		logger:  observability.NewLogger("worker"),
+		metrics: observability.NewWorkerMetrics(),
+	}
 }
 
 func (w *Worker) Run(ctx context.Context) {
@@ -35,15 +43,21 @@ func (w *Worker) Run(ctx context.Context) {
 
 	for {
 		if err := w.generateDigestForOnePersona(ctx); err != nil {
-			log.Printf("worker digest process error: %v", err)
+			w.logger.Error("worker_digest_process_error", observability.Fields{
+				"error": err.Error(),
+			})
 		}
 
 		if err := w.generateWeeklyDigestForOneUser(ctx); err != nil {
-			log.Printf("worker weekly digest process error: %v", err)
+			w.logger.Error("worker_weekly_digest_process_error", observability.Fields{
+				"error": err.Error(),
+			})
 		}
 
 		if err := w.processOne(ctx); err != nil {
-			log.Printf("worker process error: %v", err)
+			w.logger.Error("worker_process_error", observability.Fields{
+				"error": err.Error(),
+			})
 		}
 
 		select {
