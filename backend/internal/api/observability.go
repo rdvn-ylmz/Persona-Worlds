@@ -141,15 +141,22 @@ func (s *Server) refreshQueueDepthMetrics(ctx context.Context) error {
 		s.metrics.SetQueueDepthSnapshot(map[string]int{})
 		return nil
 	}
+	maxAttempts := s.cfg.JobMaxAttempts
+	if maxAttempts < 1 {
+		maxAttempts = 5
+	}
+	if maxAttempts > 20 {
+		maxAttempts = 20
+	}
 
 	queryStartedAt := time.Now()
 	rows, err := s.db.Query(ctx, `
 		SELECT job_type, COUNT(*)::int
 		FROM jobs
 		WHERE status IN ('PENDING', 'PROCESSING')
-		   OR (status = 'FAILED' AND attempts < 5)
+		   OR (status = 'FAILED' AND attempts < $1)
 		GROUP BY job_type
-	`)
+	`, maxAttempts)
 	s.metrics.ObserveDBQuery(time.Since(queryStartedAt))
 	if err != nil {
 		return err

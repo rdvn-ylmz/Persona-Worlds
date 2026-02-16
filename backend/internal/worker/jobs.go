@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand"
 	"strings"
 	"time"
 
@@ -30,19 +31,20 @@ func (w *Worker) processOne(ctx context.Context) error {
 		postID     string
 		personaID  string
 		payloadRaw []byte
+		attempts   int
 	)
 
 	selectStartedAt := time.Now()
 	err = tx.QueryRow(ctx, `
-		SELECT id, job_type, post_id::text, persona_id::text, payload
+		SELECT id, job_type, post_id::text, persona_id::text, payload, attempts
 		FROM jobs
 		WHERE status IN ('PENDING', 'FAILED')
-		  AND attempts < 5
+		  AND attempts < $1
 		  AND available_at <= NOW()
 		ORDER BY created_at ASC
 		LIMIT 1
 		FOR UPDATE SKIP LOCKED
-	`).Scan(&jobID, &jobType, &postID, &personaID, &payloadRaw)
+	`, maxJobAttempts(w.cfg.JobMaxAttempts)).Scan(&jobID, &jobType, &postID, &personaID, &payloadRaw, &attempts)
 	w.metrics.ObserveDBQuery(time.Since(selectStartedAt))
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -75,7 +77,7 @@ func (w *Worker) processOne(ctx context.Context) error {
 	})
 
 	if jobType != "generate_reply" {
-		return w.markJobFailed(ctx, jobID, jobType, traceID, permanentError{message: fmt.Sprintf("unsupported job type: %s", jobType)}, time.Since(startedAt))
+		return w.markJobFailed(ctx, jobID, jobType, traceID, attempts, permanentError{message: fmt.Sprintf("unsupported job type: %s", jobType)}, time.Since(startedAt))
 	}
 
 	err = w.executeGenerateReply(ctx, postID, personaID)
@@ -83,7 +85,7 @@ func (w *Worker) processOne(ctx context.Context) error {
 		return w.markJobDone(ctx, jobID, jobType, traceID, time.Since(startedAt))
 	}
 
-	return w.markJobFailed(ctx, jobID, jobType, traceID, err, time.Since(startedAt))
+	return w.markJobFailed(ctx, jobID, jobType, traceID, attempts, err, time.Since(startedAt))
 }
 
 func (w *Worker) executeGenerateReply(ctx context.Context, postID, personaID string) error {
@@ -146,7 +148,7 @@ func (w *Worker) executeGenerateReply(ctx context.Context, postID, personaID str
 		return err
 	}
 	if alreadyExists {
-		return permanentError{message: "reply already exists"}
+		return nil
 	}
 
 	rows, err := w.db.Query(ctx, `
@@ -199,7 +201,7 @@ func (w *Worker) executeGenerateReply(ctx context.Context, postID, personaID str
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
-			return permanentError{message: "reply already exists"}
+			return nil
 		}
 		return err
 	}
@@ -251,15 +253,25 @@ func (w *Worker) markJobDone(ctx context.Context, jobID int64, jobType, traceID 
 	return nil
 }
 
-func (w *Worker) markJobFailed(ctx context.Context, jobID int64, jobType, traceID string, failure error, duration time.Duration) error {
+func (w *Worker) markJobFailed(ctx context.Context, jobID int64, jobType, traceID string, attempts int, failure error, duration time.Duration) error {
+	maxAttempts := maxJobAttempts(w.cfg.JobMaxAttempts)
+	nextAttempt := attempts + 1
+	persistedAttempt := nextAttempt
+	if persistedAttempt < 1 {
+		persistedAttempt = 1
+	}
+	if persistedAttempt > maxAttempts {
+		persistedAttempt = maxAttempts
+	}
+	safeError := truncateJobError(failure.Error(), 500)
 	_, isPermanent := failure.(permanentError)
-	if isPermanent {
+	if isPermanent || nextAttempt >= maxAttempts {
 		queryStartedAt := time.Now()
 		_, err := w.db.Exec(ctx, `
 			UPDATE jobs
-			SET status='FAILED', attempts=5, error=$2, locked_at=NULL, updated_at=NOW()
+			SET status='FAILED', attempts=$2, error=$3, locked_at=NULL, updated_at=NOW()
 			WHERE id=$1
-		`, jobID, failure.Error())
+		`, jobID, persistedAttempt, safeError)
 		w.metrics.ObserveDBQuery(time.Since(queryStartedAt))
 		if err != nil {
 			return err
@@ -271,19 +283,21 @@ func (w *Worker) markJobFailed(ctx context.Context, jobID int64, jobType, traceI
 			"job_type":   strings.TrimSpace(jobType),
 			"status":     "failed",
 			"latency_ms": duration.Milliseconds(),
-			"error":      failure.Error(),
+			"error":      safeError,
 			"trace_id":   traceID,
 			"request_id": traceID,
 		})
 		return nil
 	}
 
+	backoff := retryBackoff(w.cfg.JobRetryBase, w.cfg.JobRetryMax, nextAttempt)
+
 	queryStartedAt := time.Now()
 	_, err := w.db.Exec(ctx, `
 		UPDATE jobs
-		SET status='FAILED', attempts=attempts+1, error=$2, locked_at=NULL, available_at=NOW()+INTERVAL '30 seconds', updated_at=NOW()
+		SET status='FAILED', attempts=$2, error=$3, locked_at=NULL, available_at=NOW()+($4::double precision * INTERVAL '1 second'), updated_at=NOW()
 		WHERE id=$1
-	`, jobID, failure.Error())
+	`, jobID, persistedAttempt, safeError, backoff.Seconds())
 	w.metrics.ObserveDBQuery(time.Since(queryStartedAt))
 	if err != nil {
 		return err
@@ -296,7 +310,7 @@ func (w *Worker) markJobFailed(ctx context.Context, jobID int64, jobType, traceI
 		"job_type":   strings.TrimSpace(jobType),
 		"status":     "retry",
 		"latency_ms": duration.Milliseconds(),
-		"error":      failure.Error(),
+		"error":      safeError,
 		"trace_id":   traceID,
 		"request_id": traceID,
 	})
@@ -315,4 +329,49 @@ func extractTraceID(payloadRaw []byte) string {
 
 	traceID, _ := payload["trace_id"].(string)
 	return strings.TrimSpace(traceID)
+}
+
+func maxJobAttempts(configured int) int {
+	if configured < 1 {
+		return 5
+	}
+	if configured > 20 {
+		return 20
+	}
+	return configured
+}
+
+func retryBackoff(base, maxDelay time.Duration, attempt int) time.Duration {
+	if base <= 0 {
+		base = 30 * time.Second
+	}
+	if maxDelay <= 0 {
+		maxDelay = 10 * time.Minute
+	}
+	if attempt < 1 {
+		attempt = 1
+	}
+
+	delay := base * time.Duration(1<<(attempt-1))
+	if delay > maxDelay {
+		delay = maxDelay
+	}
+	jitter := 0.8 + (rand.Float64() * 0.4)
+	jittered := time.Duration(float64(delay) * jitter)
+	if jittered < time.Second {
+		return time.Second
+	}
+	return jittered
+}
+
+func truncateJobError(value string, limit int) string {
+	clean := strings.TrimSpace(value)
+	if limit <= 0 {
+		limit = 500
+	}
+	runes := []rune(clean)
+	if len(runes) <= limit {
+		return clean
+	}
+	return string(runes[:limit])
 }
