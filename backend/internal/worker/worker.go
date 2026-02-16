@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"personaworlds/backend/internal/ai"
+	"personaworlds/backend/internal/common"
 	"personaworlds/backend/internal/config"
 	"personaworlds/backend/internal/safety"
 
@@ -41,10 +42,6 @@ type digestStats struct {
 	Posts      int            `json:"posts"`
 	Replies    int            `json:"replies"`
 	TopThreads []digestThread `json:"top_threads"`
-}
-
-type dbExecutor interface {
-	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
 }
 
 func (e permanentError) Error() string {
@@ -259,13 +256,13 @@ func (w *Worker) executeGenerateReply(ctx context.Context, postID, personaID str
 	metadata := map[string]any{
 		"post_id":       postID,
 		"room_id":       roomID,
-		"post_preview":  truncatePreview(postContent, 200),
-		"reply_preview": truncatePreview(generated, 200),
+		"post_preview":  common.TruncateRunes(postContent, 200),
+		"reply_preview": common.TruncateRunes(generated, 200),
 	}
-	if err := insertPersonaActivityEvent(ctx, tx, personaID, "reply_generated", metadata); err != nil {
+	if err := common.InsertPersonaActivityEvent(ctx, tx, personaID, "reply_generated", metadata); err != nil {
 		return err
 	}
-	if err := insertPersonaActivityEvent(ctx, tx, personaID, "thread_participated", metadata); err != nil {
+	if err := common.InsertPersonaActivityEvent(ctx, tx, personaID, "thread_participated", metadata); err != nil {
 		return err
 	}
 
@@ -374,7 +371,7 @@ func (w *Worker) generateDigestForOnePersona(ctx context.Context) error {
 	if summary == "" {
 		summary = fallbackDigestSummary(personaCtx, stats)
 	}
-	summary = truncatePreview(summary, w.cfg.SummaryMaxLen)
+	summary = common.TruncateRunes(summary, w.cfg.SummaryMaxLen)
 
 	statsJSON, err := json.Marshal(stats)
 	if err != nil {
@@ -449,7 +446,7 @@ func (w *Worker) collectDigestStats(ctx context.Context, personaID string) (dige
 		); err != nil {
 			return digestStats{}, err
 		}
-		thread.PostPreview = truncatePreview(thread.PostPreview, 220)
+		thread.PostPreview = common.TruncateRunes(thread.PostPreview, 220)
 		stats.TopThreads = append(stats.TopThreads, thread)
 	}
 	if err := rows.Err(); err != nil {
@@ -457,22 +454,6 @@ func (w *Worker) collectDigestStats(ctx context.Context, personaID string) (dige
 	}
 
 	return stats, nil
-}
-
-func insertPersonaActivityEvent(ctx context.Context, executor dbExecutor, personaID, eventType string, metadata map[string]any) error {
-	if metadata == nil {
-		metadata = map[string]any{}
-	}
-	raw, err := json.Marshal(metadata)
-	if err != nil {
-		return err
-	}
-
-	_, err = executor.Exec(ctx, `
-		INSERT INTO persona_activity_events(persona_id, type, metadata)
-		VALUES ($1, $2, $3::jsonb)
-	`, personaID, eventType, raw)
-	return err
 }
 
 func parseJSONStringSlice(raw []byte) []string {
@@ -517,18 +498,6 @@ func fallbackDigestSummary(persona ai.PersonaContext, stats digestStats) string 
 		return fmt.Sprintf("Bugün %d gönderi ve %d yanıt üretildi. Öne çıkan tartışmalar: %s.", stats.Posts, stats.Replies, topThreadText)
 	}
 	return fmt.Sprintf("Today there were %d posts and %d replies. The most active threads were: %s.", stats.Posts, stats.Replies, topThreadText)
-}
-
-func truncatePreview(value string, maxRunes int) string {
-	trimmed := strings.TrimSpace(value)
-	if maxRunes <= 0 {
-		return trimmed
-	}
-	runes := []rune(trimmed)
-	if len(runes) <= maxRunes {
-		return trimmed
-	}
-	return strings.TrimSpace(string(runes[:maxRunes]))
 }
 
 func (w *Worker) markJobDone(ctx context.Context, jobID int64) error {

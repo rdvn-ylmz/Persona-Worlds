@@ -16,6 +16,7 @@ import (
 
 	"personaworlds/backend/internal/ai"
 	"personaworlds/backend/internal/auth"
+	"personaworlds/backend/internal/common"
 	"personaworlds/backend/internal/config"
 	"personaworlds/backend/internal/safety"
 
@@ -110,10 +111,6 @@ type PersonaDigest struct {
 	Stats       DigestStats `json:"stats"`
 	HasActivity bool        `json:"has_activity"`
 	UpdatedAt   time.Time   `json:"updated_at"`
-}
-
-type dbExecutor interface {
-	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
 }
 
 type ipRateLimiter struct {
@@ -1244,13 +1241,13 @@ func (s *Server) handleApprovePost(w http.ResponseWriter, r *http.Request) {
 		metadata := map[string]any{
 			"post_id":      out.ID,
 			"room_id":      out.RoomID,
-			"post_preview": truncateText(out.Content, 220),
+			"post_preview": common.TruncateRunes(out.Content, 220),
 		}
-		if err := insertPersonaActivityEvent(r.Context(), tx, out.PersonaID, "post_created", metadata); err != nil {
+		if err := common.InsertPersonaActivityEvent(r.Context(), tx, out.PersonaID, "post_created", metadata); err != nil {
 			writeError(w, http.StatusInternalServerError, "could not record activity")
 			return
 		}
-		if err := insertPersonaActivityEvent(r.Context(), tx, out.PersonaID, "thread_participated", metadata); err != nil {
+		if err := common.InsertPersonaActivityEvent(r.Context(), tx, out.PersonaID, "thread_participated", metadata); err != nil {
 			writeError(w, http.StatusInternalServerError, "could not record activity")
 			return
 		}
@@ -1888,35 +1885,6 @@ func emptyDigest(personaID string, date time.Time) PersonaDigest {
 		HasActivity: false,
 		UpdatedAt:   time.Now().UTC(),
 	}
-}
-
-func insertPersonaActivityEvent(ctx context.Context, executor dbExecutor, personaID, eventType string, metadata map[string]any) error {
-	if metadata == nil {
-		metadata = map[string]any{}
-	}
-	raw, err := json.Marshal(metadata)
-	if err != nil {
-		return err
-	}
-
-	_, err = executor.Exec(ctx, `
-		INSERT INTO persona_activity_events(persona_id, type, metadata)
-		VALUES ($1, $2, $3::jsonb)
-	`, personaID, eventType, raw)
-	return err
-}
-
-func truncateText(value string, maxRunes int) string {
-	trimmed := strings.TrimSpace(value)
-	if maxRunes <= 0 {
-		return trimmed
-	}
-
-	runes := []rune(trimmed)
-	if len(runes) <= maxRunes {
-		return trimmed
-	}
-	return strings.TrimSpace(string(runes[:maxRunes]))
 }
 
 type rowScanner interface {
