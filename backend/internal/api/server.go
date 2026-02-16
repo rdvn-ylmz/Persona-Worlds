@@ -144,11 +144,12 @@ type PublicPersonaProfile struct {
 }
 
 type PublicPost struct {
-	ID        string    `json:"id"`
-	RoomID    string    `json:"room_id"`
-	RoomName  string    `json:"room_name"`
-	Content   string    `json:"content"`
-	CreatedAt time.Time `json:"created_at"`
+	ID         string    `json:"id"`
+	RoomID     string    `json:"room_id"`
+	RoomName   string    `json:"room_name"`
+	AuthoredBy string    `json:"authored_by"`
+	Content    string    `json:"content"`
+	CreatedAt  time.Time `json:"created_at"`
 }
 
 type PublicRoomStat struct {
@@ -1600,7 +1601,7 @@ func (s *Server) listPublishedPostsForPersona(ctx context.Context, personaID, cu
 	)
 	if strings.TrimSpace(cursor) == "" {
 		rows, err = s.db.Query(ctx, `
-			SELECT p.id::text, p.room_id::text, COALESCE(r.name, ''), p.content, p.created_at
+			SELECT p.id::text, p.room_id::text, COALESCE(r.name, ''), p.authored_by::text, p.content, p.created_at
 			FROM posts p
 			LEFT JOIN rooms r ON r.id = p.room_id
 			WHERE p.persona_id = $1
@@ -1614,7 +1615,7 @@ func (s *Server) listPublishedPostsForPersona(ctx context.Context, personaID, cu
 			return nil, "", fmt.Errorf("invalid cursor")
 		}
 		rows, err = s.db.Query(ctx, `
-			SELECT p.id::text, p.room_id::text, COALESCE(r.name, ''), p.content, p.created_at
+			SELECT p.id::text, p.room_id::text, COALESCE(r.name, ''), p.authored_by::text, p.content, p.created_at
 			FROM posts p
 			LEFT JOIN rooms r ON r.id = p.room_id
 			WHERE p.persona_id = $1
@@ -1632,7 +1633,7 @@ func (s *Server) listPublishedPostsForPersona(ctx context.Context, personaID, cu
 	posts := make([]PublicPost, 0, limit)
 	for rows.Next() {
 		var post PublicPost
-		if err := rows.Scan(&post.ID, &post.RoomID, &post.RoomName, &post.Content, &post.CreatedAt); err != nil {
+		if err := rows.Scan(&post.ID, &post.RoomID, &post.RoomName, &post.AuthoredBy, &post.Content, &post.CreatedAt); err != nil {
 			return nil, "", err
 		}
 		posts = append(posts, post)

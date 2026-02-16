@@ -147,6 +147,7 @@ export type PublicPersonaPost = {
   id: string;
   room_id: string;
   room_name: string;
+  authored_by: 'AI' | 'HUMAN' | 'AI_DRAFT_APPROVED';
   content: string;
   created_at: string;
 };

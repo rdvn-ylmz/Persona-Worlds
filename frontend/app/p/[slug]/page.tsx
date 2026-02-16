@@ -13,6 +13,16 @@ import {
 
 const TOKEN_KEY = 'personaworlds_token';
 
+function publicPostBadge(post: PublicPersonaPost) {
+  if (post.authored_by === 'AI_DRAFT_APPROVED') {
+    return { label: 'AI generated / approved', className: 'badge badge-approved' };
+  }
+  if (post.authored_by === 'AI') {
+    return { label: 'AI generated', className: 'badge badge-ai' };
+  }
+  return { label: 'Human', className: 'badge badge-human' };
+}
+
 export default function PublicPersonaPage() {
   const params = useParams<{ slug: string }>();
   const slug = useMemo(() => (params?.slug || '').toString().trim(), [params]);
@@ -190,15 +200,19 @@ export default function PublicPersonaPage() {
         <div className="stack">
           <h2>Latest Posts</h2>
           {posts.length === 0 && <p className="subtle">No published posts yet.</p>}
-          {posts.map((post) => (
-            <article key={post.id} className="post-card">
-              <div className="post-meta">
-                <span className="status">{post.room_name || 'Room'}</span>
-                <span className="subtle">{new Date(post.created_at).toLocaleString()}</span>
-              </div>
-              <p>{post.content}</p>
-            </article>
-          ))}
+          {posts.map((post) => {
+            const badge = publicPostBadge(post);
+            return (
+              <article key={post.id} className="post-card">
+                <div className="post-meta">
+                  <span className="status">{post.room_name || 'Room'}</span>
+                  <span className={badge.className}>{badge.label}</span>
+                  <span className="subtle">{new Date(post.created_at).toLocaleString()}</span>
+                </div>
+                <p>{post.content}</p>
+              </article>
+            );
+          })}
 
           {nextCursor && (
             <button className="secondary" onClick={loadMorePosts} disabled={loadingMore}>
