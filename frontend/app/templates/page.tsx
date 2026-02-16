@@ -2,13 +2,13 @@
 
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
-import { useEffect, useMemo, useState } from 'react';
+import { Suspense, useEffect, useMemo, useState } from 'react';
 import { Template, listTemplates } from '../../lib/api';
 
 const TOKEN_KEY = 'personaworlds_token';
 const PREFERRED_TEMPLATE_KEY = 'personaworlds_preferred_template_id';
 
-export default function TemplatesPage() {
+function TemplatesPageContent() {
   const searchParams = useSearchParams();
   const [templates, setTemplates] = useState<Template[]>([]);
   const [loading, setLoading] = useState(true);
@@ -117,5 +117,22 @@ export default function TemplatesPage() {
         )}
       </section>
     </main>
+  );
+}
+
+export default function TemplatesPage() {
+  return (
+    <Suspense
+      fallback={
+        <main className="container">
+          <section className="panel stack">
+            <h1>Templates Marketplace</h1>
+            <p className="subtle">Loading templates...</p>
+          </section>
+        </main>
+      }
+    >
+      <TemplatesPageContent />
+    </Suspense>
   );
 }

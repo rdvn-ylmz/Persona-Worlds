@@ -248,6 +248,86 @@ export type CreateBattleResponse = {
   suggested_next_url: string;
 };
 
+export type FeedBattleItem = {
+  battle_id: string;
+  room_id: string;
+  room_name: string;
+  persona_id?: string;
+  persona_name?: string;
+  topic: string;
+  created_at: string;
+  shares: number;
+  remixes: number;
+  template?: {
+    id: string;
+    name: string;
+  };
+};
+
+export type FeedTemplateItem = {
+  template_id: string;
+  name: string;
+  prompt_rules: string;
+  turn_count: number;
+  word_limit: number;
+  created_at: string;
+  usage_count: number;
+  is_trending: boolean;
+};
+
+export type FeedItem = {
+  id: string;
+  kind: 'battle' | 'template';
+  reason: string;
+  reasons: string[];
+  score: number;
+  battle?: FeedBattleItem;
+  template?: FeedTemplateItem;
+};
+
+export type FeedResponse = {
+  items: FeedItem[];
+  highlight_template?: FeedTemplateItem;
+};
+
+export type Notification = {
+  id: number;
+  actor_user_id?: string;
+  type: 'battle_remixed' | 'template_used' | 'persona_followed';
+  title: string;
+  body: string;
+  metadata: Record<string, unknown>;
+  read_at?: string;
+  created_at: string;
+};
+
+export type NotificationsResponse = {
+  notifications: Notification[];
+  unread_count: number;
+};
+
+export type WeeklyDigestItem = {
+  battle_id: string;
+  room_id: string;
+  room_name: string;
+  topic: string;
+  summary: string;
+  score: number;
+  created_at: string;
+};
+
+export type WeeklyDigest = {
+  week_start: string;
+  generated_at: string;
+  items: WeeklyDigestItem[];
+};
+
+export type WeeklyDigestResponse = {
+  digest: WeeklyDigest;
+  exists: boolean;
+  is_current_week: boolean;
+};
+
 export async function signup(email: string, password: string, shareSlug = '') {
   const normalizedShareSlug = shareSlug.trim();
   return request<{ token: string; user_id: string }>('/auth/signup', {
@@ -376,6 +456,35 @@ export async function createTemplate(
     token,
     body: payload
   });
+}
+
+export async function getFeed(token: string) {
+  return request<FeedResponse>('/feed', { token });
+}
+
+export async function getNotifications(token: string, limit = 20) {
+  const query = new URLSearchParams({ limit: String(limit) }).toString();
+  return request<NotificationsResponse>(`/notifications?${query}`, { token });
+}
+
+export async function markNotificationRead(token: string, notificationId: number) {
+  return request<{ updated: boolean; unread_count: number }>(`/notifications/${notificationId}/read`, {
+    method: 'POST',
+    token,
+    body: {}
+  });
+}
+
+export async function markAllNotificationsRead(token: string) {
+  return request<{ updated: number; unread_count: number }>('/notifications/read-all', {
+    method: 'POST',
+    token,
+    body: {}
+  });
+}
+
+export async function getWeeklyDigest(token: string) {
+  return request<WeeklyDigestResponse>('/digest/weekly', { token });
 }
 
 export async function listRooms(token: string) {

@@ -4,6 +4,9 @@ import { FormEvent, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import {
   DigestThread,
+  FeedItem,
+  FeedTemplateItem,
+  Notification,
   Persona,
   PersonaDigestResponse,
   PersonaPayload,
@@ -11,16 +14,23 @@ import {
   PreviewResponse,
   Room,
   ThreadResponse,
+  WeeklyDigestResponse,
   approvePost,
+  createBattle,
   createDraft,
   createPersona,
   generateReplies,
+  getFeed,
   getLatestDigest,
+  getNotifications,
+  getWeeklyDigest,
   getTodayDigest,
   getThread,
   listPersonas,
   listRoomPosts,
   listRooms,
+  markAllNotificationsRead,
+  markNotificationRead,
   login,
   publishPersonaProfile,
   previewPersona,
@@ -31,6 +41,7 @@ import {
 
 const TOKEN_KEY = 'personaworlds_token';
 const SHARE_SLUG_KEY = 'personaworlds_share_slug';
+const DAILY_RETURN_KEY_PREFIX = 'personaworlds_daily_return';
 
 function Badge({ authoredBy }: { authoredBy: Post['authored_by'] | ThreadResponse['replies'][number]['authored_by'] }) {
   const className =
@@ -44,6 +55,45 @@ function parseLines(value: string) {
     .split('\n')
     .map((line) => line.trim())
     .filter((line) => line.length > 0);
+}
+
+function feedReasonLabel(reason: string) {
+  if (reason === 'followed_persona') {
+    return 'From followed personas';
+  }
+  if (reason === 'trending_battle') {
+    return 'Trending now';
+  }
+  if (reason === 'new_template') {
+    return 'New template';
+  }
+  return reason;
+}
+
+function readMetadataString(metadata: Record<string, unknown>, key: string) {
+  const value = metadata[key];
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function notificationTarget(notification: Notification) {
+  const metadata = notification.metadata || {};
+  const battleID = readMetadataString(metadata, 'battle_id');
+  const sourceBattleID = readMetadataString(metadata, 'source_battle_id');
+  const slug = readMetadataString(metadata, 'slug');
+
+  if (notification.type === 'battle_remixed' && sourceBattleID) {
+    return `/b/${encodeURIComponent(sourceBattleID)}`;
+  }
+  if (notification.type === 'template_used' && battleID) {
+    return `/b/${encodeURIComponent(battleID)}`;
+  }
+  if (notification.type === 'persona_followed' && slug) {
+    return `/p/${encodeURIComponent(slug)}`;
+  }
+  if (battleID) {
+    return `/b/${encodeURIComponent(battleID)}`;
+  }
+  return '';
 }
 
 export default function HomePage() {
@@ -79,6 +129,19 @@ export default function HomePage() {
   const [digestResponse, setDigestResponse] = useState<PersonaDigestResponse | null>(null);
   const [digestLoading, setDigestLoading] = useState(false);
   const [digestSource, setDigestSource] = useState<'today' | 'latest' | 'empty'>('empty');
+  const [feedItems, setFeedItems] = useState<FeedItem[]>([]);
+  const [feedHighlightTemplate, setFeedHighlightTemplate] = useState<FeedTemplateItem | null>(null);
+  const [feedLoading, setFeedLoading] = useState(false);
+  const [feedBattleTopic, setFeedBattleTopic] = useState('');
+  const [selectedFeedTemplateId, setSelectedFeedTemplateId] = useState('');
+
+  const [notifications, setNotifications] = useState<Notification[]>([]);
+  const [notificationsLoading, setNotificationsLoading] = useState(false);
+  const [notificationsOpen, setNotificationsOpen] = useState(false);
+  const [unreadNotifications, setUnreadNotifications] = useState(0);
+
+  const [weeklyDigestResponse, setWeeklyDigestResponse] = useState<WeeklyDigestResponse | null>(null);
+  const [weeklyDigestLoading, setWeeklyDigestLoading] = useState(false);
 
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState('');
@@ -102,10 +165,21 @@ export default function HomePage() {
       setPosts([]);
       setDigestResponse(null);
       setDigestSource('empty');
+      setFeedItems([]);
+      setFeedHighlightTemplate(null);
+      setNotifications([]);
+      setUnreadNotifications(0);
+      setNotificationsOpen(false);
+      setWeeklyDigestResponse(null);
+      setSelectedFeedTemplateId('');
+      setFeedBattleTopic('');
       return;
     }
 
     void refreshCoreData(token);
+    void refreshFeed(token);
+    void refreshNotifications(token);
+    void refreshWeeklyDigest(token);
   }, [token]);
 
   useEffect(() => {
@@ -115,6 +189,42 @@ export default function HomePage() {
     }
     void refreshPosts(token, selectedRoomId);
   }, [token, selectedRoomId]);
+
+  useEffect(() => {
+    if (!token || typeof window === 'undefined') {
+      return;
+    }
+
+    const dayKey = new Date().toISOString().slice(0, 10);
+    const storageKey = `${DAILY_RETURN_KEY_PREFIX}:${dayKey}`;
+    if (localStorage.getItem(storageKey)) {
+      return;
+    }
+    localStorage.setItem(storageKey, '1');
+
+    void trackEvent(
+      'daily_return',
+      {
+        source: 'dashboard',
+        day: dayKey
+      },
+      token
+    ).catch(() => {
+      localStorage.removeItem(storageKey);
+    });
+  }, [token]);
+
+  useEffect(() => {
+    if (!token) {
+      return;
+    }
+    const interval = window.setInterval(() => {
+      void refreshNotifications(token);
+    }, 30000);
+    return () => {
+      window.clearInterval(interval);
+    };
+  }, [token]);
 
   useEffect(() => {
     if (!selectedPersona) {
@@ -204,6 +314,47 @@ export default function HomePage() {
     }
   }
 
+  async function refreshFeed(authToken: string) {
+    try {
+      setFeedLoading(true);
+      const response = await getFeed(authToken);
+      setFeedItems(response.items || []);
+      setFeedHighlightTemplate(response.highlight_template || null);
+      if (!selectedFeedTemplateId && response.highlight_template?.template_id) {
+        setSelectedFeedTemplateId(response.highlight_template.template_id);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'could not load feed');
+    } finally {
+      setFeedLoading(false);
+    }
+  }
+
+  async function refreshNotifications(authToken: string) {
+    try {
+      setNotificationsLoading(true);
+      const response = await getNotifications(authToken, 24);
+      setNotifications(response.notifications || []);
+      setUnreadNotifications(response.unread_count || 0);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'could not load notifications');
+    } finally {
+      setNotificationsLoading(false);
+    }
+  }
+
+  async function refreshWeeklyDigest(authToken: string) {
+    try {
+      setWeeklyDigestLoading(true);
+      const response = await getWeeklyDigest(authToken);
+      setWeeklyDigestResponse(response);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'could not load weekly digest');
+    } finally {
+      setWeeklyDigestLoading(false);
+    }
+  }
+
   function buildPersonaPayload(): PersonaPayload {
     const writingSamples = parseLines(writingSamplesText);
     const doNotSay = parseLines(doNotSayText);
@@ -271,6 +422,14 @@ export default function HomePage() {
     setPreviewQuota(null);
     setDigestResponse(null);
     setDigestSource('empty');
+    setFeedItems([]);
+    setFeedHighlightTemplate(null);
+    setFeedBattleTopic('');
+    setSelectedFeedTemplateId('');
+    setNotifications([]);
+    setUnreadNotifications(0);
+    setNotificationsOpen(false);
+    setWeeklyDigestResponse(null);
     setMessage('Logged out.');
   }
 
@@ -358,6 +517,7 @@ export default function HomePage() {
       const draft = await createDraft(token, selectedRoomId, selectedPersonaId);
       setPosts((current) => [draft, ...current]);
       setMessage('AI draft post created. Review and approve to publish.');
+      void refreshFeed(token);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'could not create draft');
     } finally {
@@ -380,6 +540,8 @@ export default function HomePage() {
       if (digestPersonaId) {
         void refreshDigest(token, digestPersonaId);
       }
+      void refreshFeed(token);
+      void refreshWeeklyDigest(token);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'could not approve post');
     } finally {
@@ -441,6 +603,124 @@ export default function HomePage() {
       setMessage('Digest thread loaded.');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'could not load digest thread');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function onToggleNotifications() {
+    setNotificationsOpen((current) => {
+      const next = !current;
+      if (next && token) {
+        void refreshNotifications(token);
+      }
+      return next;
+    });
+  }
+
+  async function onMarkAllNotificationsRead() {
+    if (!token) {
+      return;
+    }
+    try {
+      const response = await markAllNotificationsRead(token);
+      setUnreadNotifications(response.unread_count || 0);
+      setNotifications((current) =>
+        current.map((notification) => ({
+          ...notification,
+          read_at: notification.read_at || new Date().toISOString()
+        }))
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'could not mark notifications as read');
+    }
+  }
+
+  async function onNotificationClick(notification: Notification) {
+    if (!token) {
+      return;
+    }
+
+    try {
+      const response = await markNotificationRead(token, notification.id);
+      setUnreadNotifications(response.unread_count || 0);
+      setNotifications((current) =>
+        current.map((item) =>
+          item.id === notification.id
+            ? {
+                ...item,
+                read_at: item.read_at || new Date().toISOString()
+              }
+            : item
+        )
+      );
+
+      void trackEvent(
+        'notification_clicked',
+        {
+          notification_id: notification.id,
+          notification_type: notification.type
+        },
+        token
+      ).catch(() => undefined);
+
+      const target = notificationTarget(notification);
+      if (target && typeof window !== 'undefined') {
+        window.location.href = target;
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'could not open notification');
+    }
+  }
+
+  function onSelectFeedTemplate(templateID: string) {
+    const cleanTemplateID = templateID.trim();
+    if (!cleanTemplateID) {
+      return;
+    }
+    setSelectedFeedTemplateId(cleanTemplateID);
+    setMessage('Template selected from feed. Add a topic and create a battle.');
+  }
+
+  async function onCreateBattleFromFeed() {
+    if (!token || !selectedRoomId) {
+      setError('select a room first');
+      return;
+    }
+    if (!feedBattleTopic.trim()) {
+      setError('enter a battle topic first');
+      return;
+    }
+
+    try {
+      setLoading(true);
+      setError('');
+
+      const created = await createBattle(token, selectedRoomId, {
+        topic: feedBattleTopic.trim(),
+        template_id: selectedFeedTemplateId || undefined
+      });
+
+      setPosts((current) => [created.post, ...current]);
+      setFeedBattleTopic('');
+      setMessage('Battle created from feed.');
+
+      if (selectedFeedTemplateId) {
+        void trackEvent(
+          'template_used_from_feed',
+          {
+            template_id: selectedFeedTemplateId,
+            battle_id: created.battle_id,
+            room_id: selectedRoomId
+          },
+          token
+        ).catch(() => undefined);
+      }
+
+      void refreshFeed(token);
+      void refreshWeeklyDigest(token);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'could not create battle from feed');
     } finally {
       setLoading(false);
     }
@@ -533,6 +813,13 @@ export default function HomePage() {
           <p>Interest room: {selectedRoom?.name || 'Select a room'}</p>
         </div>
         <div className="header-actions">
+          <button className="secondary bell-button" onClick={onToggleNotifications} disabled={notificationsLoading}>
+            <svg className="bell-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+              <path d="M12 22a2.25 2.25 0 0 0 2.2-1.75h-4.4A2.25 2.25 0 0 0 12 22Zm7-5.5H5.1l1.4-1.8V10a5.5 5.5 0 1 1 11 0v4.7l1.5 1.8Z" />
+            </svg>
+            <span>Notifications</span>
+            {unreadNotifications > 0 && <span className="unread-badge">{unreadNotifications}</span>}
+          </button>
           <Link className="cta-link" href="/templates">
             Templates
           </Link>
@@ -547,6 +834,249 @@ export default function HomePage() {
           </button>
         </div>
       </header>
+
+      {notificationsOpen && (
+        <section className="panel notifications-panel stack">
+          <div className="digest-header">
+            <div>
+              <h2>Notifications</h2>
+              <p className="subtle">In-app alerts only</p>
+            </div>
+            <div className="row">
+              <button className="secondary" onClick={onMarkAllNotificationsRead} disabled={notifications.length === 0}>
+                Mark all read
+              </button>
+              <button
+                className="secondary"
+                onClick={() => {
+                  if (token) {
+                    void refreshNotifications(token);
+                  }
+                }}
+                disabled={notificationsLoading}
+              >
+                Refresh
+              </button>
+            </div>
+          </div>
+
+          {notificationsLoading && <p className="subtle">Loading notifications...</p>}
+          {!notificationsLoading && notifications.length === 0 && <p className="subtle">You are all caught up.</p>}
+
+          {!notificationsLoading && notifications.length > 0 && (
+            <div className="notification-list">
+              {notifications.map((notification) => {
+                const target = notificationTarget(notification);
+                const unread = !notification.read_at;
+                return (
+                  <button
+                    key={notification.id}
+                    type="button"
+                    className={unread ? 'notification-item unread' : 'notification-item'}
+                    onClick={() => void onNotificationClick(notification)}
+                  >
+                    <div className="row">
+                      <strong>{notification.title}</strong>
+                      <span className="subtle">{new Date(notification.created_at).toLocaleString()}</span>
+                    </div>
+                    <span>{notification.body}</span>
+                    {target && <span className="subtle">Open: {target}</span>}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </section>
+      )}
+
+      <section className="panel feed-panel stack">
+        <div className="digest-header">
+          <div>
+            <h2>Home Feed</h2>
+            <p className="subtle">Followed battles, trending threads, and new templates.</p>
+          </div>
+          <button
+            className="secondary"
+            onClick={() => {
+              if (token) {
+                void refreshFeed(token);
+              }
+            }}
+            disabled={feedLoading}
+          >
+            Refresh Feed
+          </button>
+        </div>
+
+        {feedHighlightTemplate && (
+          <article className="mini-card feed-highlight-template">
+            <div className="row">
+              <strong>Trending template: {feedHighlightTemplate.name}</strong>
+              <span className="status">Uses: {feedHighlightTemplate.usage_count}</span>
+            </div>
+            <p>{feedHighlightTemplate.prompt_rules}</p>
+            <button
+              type="button"
+              className="secondary"
+              onClick={() => onSelectFeedTemplate(feedHighlightTemplate.template_id)}
+            >
+              Use this template
+            </button>
+          </article>
+        )}
+
+        <form
+          className="row feed-compose"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void onCreateBattleFromFeed();
+          }}
+        >
+          <input
+            value={feedBattleTopic}
+            onChange={(event) => setFeedBattleTopic(event.target.value)}
+            placeholder="Battle topic (required)"
+          />
+          <button type="submit" disabled={loading || !selectedRoomId}>
+            Create Battle
+          </button>
+        </form>
+
+        {selectedFeedTemplateId && (
+          <p className="subtle">Selected template id: {selectedFeedTemplateId}</p>
+        )}
+
+        {feedLoading && <p className="subtle">Loading feed...</p>}
+        {!feedLoading && feedItems.length === 0 && (
+          <div className="mini-card stack empty-feed-state">
+            <p className="subtle">No feed items yet. Create a battle to start momentum.</p>
+            <button
+              type="button"
+              onClick={() => {
+                if (feedHighlightTemplate?.template_id) {
+                  setSelectedFeedTemplateId(feedHighlightTemplate.template_id);
+                }
+                setFeedBattleTopic((current) => current || 'My first battle topic');
+              }}
+            >
+              Create your first battle
+            </button>
+          </div>
+        )}
+
+        {!feedLoading && feedItems.length > 0 && (
+          <div className="feed-list">
+            {feedItems.map((item) => {
+              if (item.kind === 'battle' && item.battle) {
+                return (
+                  <article key={item.id} className="post-card feed-item">
+                    <div className="post-meta">
+                      {item.reasons.map((reason) => (
+                        <span key={`${item.id}-${reason}`} className="status">
+                          {feedReasonLabel(reason)}
+                        </span>
+                      ))}
+                      <span className="subtle">{new Date(item.battle.created_at).toLocaleString()}</span>
+                    </div>
+                    <p>{item.battle.topic}</p>
+                    <div className="row">
+                      <span className="subtle">
+                        Shares: {item.battle.shares} · Remixes: {item.battle.remixes}
+                      </span>
+                      <button
+                        type="button"
+                        className="secondary"
+                        onClick={() => onOpenBattleCard(item.battle?.battle_id || '')}
+                      >
+                        Open battle
+                      </button>
+                    </div>
+                  </article>
+                );
+              }
+
+              if (item.kind === 'template' && item.template) {
+                const template = item.template;
+                const isSelected = selectedFeedTemplateId === template.template_id;
+                return (
+                  <article key={item.id} className={isSelected ? 'template-card selected' : 'template-card'}>
+                    <div className="post-meta">
+                      {item.reasons.map((reason) => (
+                        <span key={`${item.id}-${reason}`} className="status">
+                          {feedReasonLabel(reason)}
+                        </span>
+                      ))}
+                      {template.is_trending && <span className="badge badge-preview">Trending</span>}
+                    </div>
+                    <h3>{template.name}</h3>
+                    <p className="subtle">
+                      {template.turn_count} turns · {template.word_limit} words · Uses: {template.usage_count}
+                    </p>
+                    <p>{template.prompt_rules}</p>
+                    <button type="button" className="secondary" onClick={() => onSelectFeedTemplate(template.template_id)}>
+                      Use this template
+                    </button>
+                  </article>
+                );
+              }
+
+              return null;
+            })}
+          </div>
+        )}
+      </section>
+
+      <section className="panel weekly-digest-panel stack">
+        <div className="digest-header">
+          <div>
+            <h2>Weekly Digest</h2>
+            <p className="subtle">Top battles you may have missed this week.</p>
+          </div>
+          <button
+            className="secondary"
+            onClick={() => {
+              if (token) {
+                void refreshWeeklyDigest(token);
+              }
+            }}
+            disabled={weeklyDigestLoading}
+          >
+            Refresh Weekly
+          </button>
+        </div>
+
+        {weeklyDigestLoading && <p className="subtle">Loading weekly digest...</p>}
+        {!weeklyDigestLoading &&
+          (!weeklyDigestResponse || !weeklyDigestResponse.exists || weeklyDigestResponse.digest.items.length === 0) && (
+            <p className="subtle">No missed battles found this week yet.</p>
+          )}
+
+        {!weeklyDigestLoading &&
+          weeklyDigestResponse &&
+          weeklyDigestResponse.exists &&
+          weeklyDigestResponse.digest.items.length > 0 && (
+            <>
+              {!weeklyDigestResponse.is_current_week && (
+                <p className="subtle">Showing the latest available weekly digest snapshot.</p>
+              )}
+              <div className="weekly-digest-list">
+                {weeklyDigestResponse.digest.items.map((item) => (
+                  <article key={`weekly-${item.battle_id}`} className="mini-card">
+                    <div className="row">
+                      <strong>{item.room_name || 'Battle'}</strong>
+                      <span className="subtle">{new Date(item.created_at).toLocaleDateString()}</span>
+                    </div>
+                    <p>{item.topic}</p>
+                    <p className="subtle">{item.summary}</p>
+                    <button type="button" className="secondary" onClick={() => onOpenBattleCard(item.battle_id)}>
+                      Open battle
+                    </button>
+                  </article>
+                ))}
+              </div>
+            </>
+          )}
+      </section>
 
       <section className="panel digest-panel stack">
         <div className="digest-header">

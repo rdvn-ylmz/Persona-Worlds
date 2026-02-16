@@ -2,13 +2,13 @@
 
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
-import { FormEvent, useMemo, useState } from 'react';
+import { FormEvent, Suspense, useMemo, useState } from 'react';
 import { login, signup } from '../../lib/api';
 
 const TOKEN_KEY = 'personaworlds_token';
 const SHARE_SLUG_KEY = 'personaworlds_share_slug';
 
-export default function SignupPage() {
+function SignupPageContent() {
   const searchParams = useSearchParams();
   const [isSignup, setIsSignup] = useState(true);
   const [email, setEmail] = useState('');
@@ -87,5 +87,22 @@ export default function SignupPage() {
         )}
       </section>
     </main>
+  );
+}
+
+export default function SignupPage() {
+  return (
+    <Suspense
+      fallback={
+        <main className="container">
+          <section className="panel auth-panel stack">
+            <h1>Create account</h1>
+            <p className="subtle">Loading signup flow...</p>
+          </section>
+        </main>
+      }
+    >
+      <SignupPageContent />
+    </Suspense>
   );
 }

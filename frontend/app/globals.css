@@ -50,6 +50,95 @@ body {
   gap: 8px;
 }
 
+.bell-button {
+  width: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  position: relative;
+}
+
+.bell-icon {
+  width: 18px;
+  height: 18px;
+  fill: currentColor;
+}
+
+.unread-badge {
+  min-width: 20px;
+  height: 20px;
+  border-radius: 999px;
+  background: #db2d31;
+  color: #fff;
+  font-size: 0.75rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 6px;
+}
+
+.notifications-panel {
+  background: linear-gradient(120deg, #fffdf9 0%, #f6fbff 100%);
+}
+
+.notification-list {
+  display: grid;
+  gap: 8px;
+}
+
+.notification-item {
+  border: 1px solid var(--border);
+  background: #fff;
+  color: inherit;
+  text-align: left;
+  display: grid;
+  gap: 6px;
+  padding: 10px;
+}
+
+.notification-item.unread {
+  border-color: #94a3b8;
+  background: #f8fbff;
+}
+
+.feed-panel {
+  background: linear-gradient(120deg, #f8fcff 0%, #f5fff8 100%);
+}
+
+.feed-highlight-template {
+  background: #fffaf0;
+}
+
+.feed-compose input {
+  flex: 1 1 360px;
+}
+
+.feed-compose button {
+  width: auto;
+}
+
+.feed-list {
+  display: grid;
+  gap: 10px;
+}
+
+.feed-item {
+  background: #fff;
+}
+
+.empty-feed-state button {
+  width: auto;
+}
+
+.weekly-digest-panel {
+  background: linear-gradient(120deg, #fafbff 0%, #f7fffb 100%);
+}
+
+.weekly-digest-list {
+  display: grid;
+  gap: 8px;
+}
+
 .digest-panel {
   background: linear-gradient(120deg, #f9fcff 0%, #f4fbf8 100%);
 }
