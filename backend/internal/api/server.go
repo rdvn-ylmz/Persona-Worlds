@@ -6,9 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
+	"unicode"
 
 	"personaworlds/backend/internal/ai"
 	"personaworlds/backend/internal/auth"
@@ -24,9 +28,11 @@ import (
 )
 
 type Server struct {
-	cfg config.Config
-	db  *pgxpool.Pool
-	llm ai.LLMClient
+	cfg                config.Config
+	db                 *pgxpool.Pool
+	llm                ai.LLMClient
+	publicReadLimiter  *ipRateLimiter
+	publicWriteLimiter *ipRateLimiter
 }
 
 type Persona struct {
@@ -110,8 +116,126 @@ type dbExecutor interface {
 	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
 }
 
+type ipRateLimiter struct {
+	mu      sync.Mutex
+	limit   int
+	window  time.Duration
+	buckets map[string]rateLimitBucket
+}
+
+type rateLimitBucket struct {
+	count       int
+	windowStart time.Time
+}
+
+type PublicPersonaProfile struct {
+	PersonaID         string    `json:"persona_id"`
+	Slug              string    `json:"slug"`
+	Name              string    `json:"name"`
+	Bio               string    `json:"bio"`
+	Tone              string    `json:"tone"`
+	PreferredLanguage string    `json:"preferred_language"`
+	Formality         int       `json:"formality"`
+	IsPublic          bool      `json:"is_public"`
+	Followers         int       `json:"followers"`
+	PostsCount        int       `json:"posts_count"`
+	Badges            []string  `json:"badges"`
+	CreatedAt         time.Time `json:"created_at"`
+}
+
+type PublicPost struct {
+	ID        string    `json:"id"`
+	RoomID    string    `json:"room_id"`
+	RoomName  string    `json:"room_name"`
+	Content   string    `json:"content"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+type PublicRoomStat struct {
+	RoomID    string `json:"room_id"`
+	RoomName  string `json:"room_name"`
+	PostCount int    `json:"post_count"`
+}
+
 func New(cfg config.Config, db *pgxpool.Pool, llm ai.LLMClient) *Server {
-	return &Server{cfg: cfg, db: db, llm: llm}
+	return &Server{
+		cfg:                cfg,
+		db:                 db,
+		llm:                llm,
+		publicReadLimiter:  newIPRateLimiter(120, time.Minute),
+		publicWriteLimiter: newIPRateLimiter(30, time.Minute),
+	}
+}
+
+func newIPRateLimiter(limit int, window time.Duration) *ipRateLimiter {
+	return &ipRateLimiter{
+		limit:   limit,
+		window:  window,
+		buckets: map[string]rateLimitBucket{},
+	}
+}
+
+func (rl *ipRateLimiter) allow(key string, now time.Time) bool {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	bucket, exists := rl.buckets[key]
+	if !exists || now.Sub(bucket.windowStart) >= rl.window {
+		rl.buckets[key] = rateLimitBucket{
+			count:       1,
+			windowStart: now,
+		}
+		rl.gc(now)
+		return true
+	}
+
+	if bucket.count >= rl.limit {
+		return false
+	}
+	bucket.count++
+	rl.buckets[key] = bucket
+	return true
+}
+
+func (rl *ipRateLimiter) gc(now time.Time) {
+	for key, bucket := range rl.buckets {
+		if now.Sub(bucket.windowStart) >= rl.window*2 {
+			delete(rl.buckets, key)
+		}
+	}
+}
+
+func (s *Server) publicReadRateLimitMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		clientIP := requestClientIP(r)
+		if !s.publicReadLimiter.allow(clientIP, time.Now()) {
+			writeError(w, http.StatusTooManyRequests, "public profile rate limit exceeded")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (s *Server) publicWriteRateLimitMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		clientIP := requestClientIP(r)
+		if !s.publicWriteLimiter.allow(clientIP, time.Now()) {
+			writeError(w, http.StatusTooManyRequests, "follow rate limit exceeded")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func requestClientIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
+	if err == nil && host != "" {
+		return host
+	}
+	if strings.TrimSpace(r.RemoteAddr) != "" {
+		return strings.TrimSpace(r.RemoteAddr)
+	}
+	return "unknown"
 }
 
 func (s *Server) Router() http.Handler {
@@ -137,6 +261,12 @@ func (s *Server) Router() http.Handler {
 		r.Post("/login", s.handleLogin)
 	})
 
+	r.Route("/p/{slug}", func(r chi.Router) {
+		r.With(s.publicReadRateLimitMiddleware).Get("/", s.handleGetPublicProfile)
+		r.With(s.publicReadRateLimitMiddleware).Get("/posts", s.handleGetPublicProfilePosts)
+		r.With(s.publicWriteRateLimitMiddleware).Post("/follow", s.handleFollowPublicProfile)
+	})
+
 	r.Group(func(r chi.Router) {
 		r.Use(auth.Middleware(s.cfg.JWTSecret))
 
@@ -148,6 +278,8 @@ func (s *Server) Router() http.Handler {
 		r.Post("/personas/{id}/preview", s.handlePreviewPersona)
 		r.Get("/personas/{id}/digest/today", s.handleGetTodayDigest)
 		r.Get("/personas/{id}/digest/latest", s.handleGetLatestDigest)
+		r.Post("/personas/{id}/publish-profile", s.handlePublishPersonaProfile)
+		r.Post("/personas/{id}/unpublish-profile", s.handleUnpublishPersonaProfile)
 
 		r.Get("/rooms", s.handleListRooms)
 		r.Get("/rooms/{id}/posts", s.handleListRoomPosts)
@@ -246,6 +378,298 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"token": token, "user_id": userID})
+}
+
+func (s *Server) handleGetPublicProfile(w http.ResponseWriter, r *http.Request) {
+	slug := normalizePublicSlug(chi.URLParam(r, "slug"))
+	if slug == "" {
+		writeError(w, http.StatusNotFound, "public profile not found")
+		return
+	}
+
+	profile, _, err := s.getPublicProfileBySlug(r.Context(), slug)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "public profile not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "could not load public profile")
+		return
+	}
+
+	latestPosts, nextCursor, err := s.listPublishedPostsForPersona(r.Context(), profile.PersonaID, "", 10)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not load public posts")
+		return
+	}
+
+	topRooms, err := s.listTopRoomsForPersona(r.Context(), profile.PersonaID, 3)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not load top rooms")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"profile":      profile,
+		"latest_posts": latestPosts,
+		"top_rooms":    topRooms,
+		"next_cursor":  nextCursor,
+	})
+}
+
+func (s *Server) handleGetPublicProfilePosts(w http.ResponseWriter, r *http.Request) {
+	slug := normalizePublicSlug(chi.URLParam(r, "slug"))
+	if slug == "" {
+		writeError(w, http.StatusNotFound, "public profile not found")
+		return
+	}
+
+	profile, _, err := s.getPublicProfileBySlug(r.Context(), slug)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "public profile not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "could not load public profile")
+		return
+	}
+
+	cursor := strings.TrimSpace(r.URL.Query().Get("cursor"))
+	posts, nextCursor, err := s.listPublishedPostsForPersona(r.Context(), profile.PersonaID, cursor, 10)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"posts":       posts,
+		"next_cursor": nextCursor,
+	})
+}
+
+func (s *Server) handleFollowPublicProfile(w http.ResponseWriter, r *http.Request) {
+	slug := normalizePublicSlug(chi.URLParam(r, "slug"))
+	if slug == "" {
+		writeError(w, http.StatusNotFound, "public profile not found")
+		return
+	}
+
+	profile, ownerUserID, err := s.getPublicProfileBySlug(r.Context(), slug)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "public profile not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "could not load public profile")
+		return
+	}
+
+	followerUserID, ok := s.optionalUserIDFromRequest(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{
+			"error": "signup_required",
+		})
+		return
+	}
+
+	if followerUserID == ownerUserID {
+		writeError(w, http.StatusConflict, "cannot follow your own persona")
+		return
+	}
+
+	ct, err := s.db.Exec(r.Context(), `
+		INSERT INTO persona_follows(follower_user_id, followed_persona_id)
+		VALUES ($1, $2)
+		ON CONFLICT (follower_user_id, followed_persona_id) DO NOTHING
+	`, followerUserID, profile.PersonaID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not follow persona")
+		return
+	}
+
+	var followers int
+	if err := s.db.QueryRow(r.Context(), `
+		SELECT COUNT(*)::int
+		FROM persona_follows
+		WHERE followed_persona_id = $1
+	`, profile.PersonaID).Scan(&followers); err != nil {
+		writeError(w, http.StatusInternalServerError, "could not load followers")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"followed":  ct.RowsAffected() > 0,
+		"followers": followers,
+	})
+}
+
+func (s *Server) handlePublishPersonaProfile(w http.ResponseWriter, r *http.Request) {
+	userID, ok := auth.UserIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "missing user")
+		return
+	}
+
+	personaID := chi.URLParam(r, "id")
+	var req struct {
+		Slug string `json:"slug"`
+		Bio  string `json:"bio"`
+	}
+	if err := decodeJSONAllowEmpty(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	var persona struct {
+		Name string
+		Bio  string
+	}
+	err := s.db.QueryRow(r.Context(), `
+		SELECT name, bio
+		FROM personas
+		WHERE id = $1 AND user_id = $2
+	`, personaID, userID).Scan(&persona.Name, &persona.Bio)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "persona not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "could not load persona")
+		return
+	}
+
+	requestedSlug := strings.TrimSpace(req.Slug)
+	normalizedRequestedSlug := normalizePublicSlug(requestedSlug)
+	if requestedSlug != "" && normalizedRequestedSlug == "" {
+		writeError(w, http.StatusBadRequest, "slug must contain only letters, numbers, spaces, hyphen or underscore")
+		return
+	}
+
+	publicBio := strings.TrimSpace(req.Bio)
+	if publicBio == "" {
+		publicBio = strings.TrimSpace(persona.Bio)
+	}
+
+	var currentSlug string
+	err = s.db.QueryRow(r.Context(), `
+		SELECT slug
+		FROM persona_public_profiles
+		WHERE persona_id = $1
+	`, personaID).Scan(&currentSlug)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusInternalServerError, "could not inspect profile")
+		return
+	}
+
+	baseSlug := normalizePublicSlug(persona.Name)
+	if baseSlug == "" {
+		baseSlug = "persona"
+	}
+	if normalizedRequestedSlug != "" {
+		baseSlug = normalizedRequestedSlug
+	} else if strings.TrimSpace(currentSlug) != "" {
+		baseSlug = strings.TrimSpace(currentSlug)
+	}
+
+	finalSlug, err := s.ensureUniquePublicProfileSlug(r.Context(), baseSlug, personaID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not create unique slug")
+		return
+	}
+
+	var out struct {
+		Slug      string
+		IsPublic  bool
+		Bio       string
+		CreatedAt time.Time
+	}
+	err = s.db.QueryRow(r.Context(), `
+		INSERT INTO persona_public_profiles(persona_id, slug, is_public, bio)
+		VALUES ($1, $2, TRUE, $3)
+		ON CONFLICT (persona_id)
+		DO UPDATE SET
+			slug = EXCLUDED.slug,
+			is_public = TRUE,
+			bio = EXCLUDED.bio
+		RETURNING slug, is_public, bio, created_at
+	`, personaID, finalSlug, publicBio).Scan(&out.Slug, &out.IsPublic, &out.Bio, &out.CreatedAt)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			writeError(w, http.StatusConflict, "slug already in use")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "could not publish profile")
+		return
+	}
+
+	shareURL := fmt.Sprintf("%s/p/%s", strings.TrimRight(s.cfg.FrontendOrigin, "/"), out.Slug)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"persona_id": personaID,
+		"slug":       out.Slug,
+		"is_public":  out.IsPublic,
+		"bio":        out.Bio,
+		"created_at": out.CreatedAt,
+		"share_url":  shareURL,
+	})
+}
+
+func (s *Server) handleUnpublishPersonaProfile(w http.ResponseWriter, r *http.Request) {
+	userID, ok := auth.UserIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "missing user")
+		return
+	}
+	personaID := chi.URLParam(r, "id")
+
+	var exists bool
+	if err := s.db.QueryRow(r.Context(), `
+		SELECT EXISTS(
+			SELECT 1
+			FROM personas
+			WHERE id = $1 AND user_id = $2
+		)
+	`, personaID, userID).Scan(&exists); err != nil {
+		writeError(w, http.StatusInternalServerError, "could not validate persona")
+		return
+	}
+	if !exists {
+		writeError(w, http.StatusNotFound, "persona not found")
+		return
+	}
+
+	var slug string
+	err := s.db.QueryRow(r.Context(), `
+		SELECT slug
+		FROM persona_public_profiles
+		WHERE persona_id = $1
+	`, personaID).Scan(&slug)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusInternalServerError, "could not load profile")
+		return
+	}
+
+	if !errors.Is(err, pgx.ErrNoRows) {
+		if _, err := s.db.Exec(r.Context(), `
+			UPDATE persona_public_profiles
+			SET is_public = FALSE
+			WHERE persona_id = $1
+		`, personaID); err != nil {
+			writeError(w, http.StatusInternalServerError, "could not unpublish profile")
+			return
+		}
+	}
+
+	shareURL := ""
+	if strings.TrimSpace(slug) != "" {
+		shareURL = fmt.Sprintf("%s/p/%s", strings.TrimRight(s.cfg.FrontendOrigin, "/"), slug)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"persona_id": personaID,
+		"slug":       strings.TrimSpace(slug),
+		"is_public":  false,
+		"share_url":  shareURL,
+	})
 }
 
 func (s *Server) handleListPersonas(w http.ResponseWriter, r *http.Request) {
@@ -1097,6 +1521,271 @@ func (s *Server) resolvePersonaIDsForReplyGeneration(ctx context.Context, userID
 		return nil, fmt.Errorf("no personas available")
 	}
 	return ids, nil
+}
+
+func (s *Server) optionalUserIDFromRequest(r *http.Request) (string, bool) {
+	header := strings.TrimSpace(r.Header.Get("Authorization"))
+	if header == "" {
+		return "", false
+	}
+	parts := strings.SplitN(header, " ", 2)
+	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
+		return "", false
+	}
+	claims, err := auth.ParseToken(s.cfg.JWTSecret, parts[1])
+	if err != nil {
+		return "", false
+	}
+	if strings.TrimSpace(claims.UserID) == "" {
+		return "", false
+	}
+	return strings.TrimSpace(claims.UserID), true
+}
+
+func (s *Server) getPublicProfileBySlug(ctx context.Context, slug string) (PublicPersonaProfile, string, error) {
+	var (
+		profile     PublicPersonaProfile
+		ownerUserID string
+	)
+	err := s.db.QueryRow(ctx, `
+		SELECT
+			p.id::text,
+			p.user_id::text,
+			pp.slug,
+			p.name,
+			COALESCE(NULLIF(pp.bio, ''), p.bio),
+			p.tone,
+			p.preferred_language,
+			p.formality,
+			pp.is_public,
+			pp.created_at,
+			COALESCE((SELECT COUNT(*)::int FROM persona_follows f WHERE f.followed_persona_id = p.id), 0),
+			COALESCE((SELECT COUNT(*)::int FROM posts ps WHERE ps.persona_id = p.id AND ps.status = 'PUBLISHED'), 0)
+		FROM persona_public_profiles pp
+		JOIN personas p ON p.id = pp.persona_id
+		WHERE pp.slug = $1
+		  AND pp.is_public = TRUE
+	`, slug).Scan(
+		&profile.PersonaID,
+		&ownerUserID,
+		&profile.Slug,
+		&profile.Name,
+		&profile.Bio,
+		&profile.Tone,
+		&profile.PreferredLanguage,
+		&profile.Formality,
+		&profile.IsPublic,
+		&profile.CreatedAt,
+		&profile.Followers,
+		&profile.PostsCount,
+	)
+	if err != nil {
+		return PublicPersonaProfile{}, "", err
+	}
+	profile.Badges = buildPublicProfileBadges(profile)
+	return profile, ownerUserID, nil
+}
+
+func (s *Server) listPublishedPostsForPersona(ctx context.Context, personaID, cursor string, limit int) ([]PublicPost, string, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	if limit > 50 {
+		limit = 50
+	}
+
+	var (
+		rows pgx.Rows
+		err  error
+	)
+	if strings.TrimSpace(cursor) == "" {
+		rows, err = s.db.Query(ctx, `
+			SELECT p.id::text, p.room_id::text, COALESCE(r.name, ''), p.content, p.created_at
+			FROM posts p
+			LEFT JOIN rooms r ON r.id = p.room_id
+			WHERE p.persona_id = $1
+			  AND p.status = 'PUBLISHED'
+			ORDER BY p.created_at DESC, p.id DESC
+			LIMIT $2
+		`, personaID, limit)
+	} else {
+		cursorTime, cursorID, parseErr := parsePublicPostCursor(cursor)
+		if parseErr != nil {
+			return nil, "", fmt.Errorf("invalid cursor")
+		}
+		rows, err = s.db.Query(ctx, `
+			SELECT p.id::text, p.room_id::text, COALESCE(r.name, ''), p.content, p.created_at
+			FROM posts p
+			LEFT JOIN rooms r ON r.id = p.room_id
+			WHERE p.persona_id = $1
+			  AND p.status = 'PUBLISHED'
+			  AND (p.created_at < $2 OR (p.created_at = $2 AND p.id < $3::uuid))
+			ORDER BY p.created_at DESC, p.id DESC
+			LIMIT $4
+		`, personaID, cursorTime, cursorID, limit)
+	}
+	if err != nil {
+		return nil, "", err
+	}
+	defer rows.Close()
+
+	posts := make([]PublicPost, 0, limit)
+	for rows.Next() {
+		var post PublicPost
+		if err := rows.Scan(&post.ID, &post.RoomID, &post.RoomName, &post.Content, &post.CreatedAt); err != nil {
+			return nil, "", err
+		}
+		posts = append(posts, post)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", err
+	}
+
+	nextCursor := ""
+	if len(posts) == limit {
+		last := posts[len(posts)-1]
+		nextCursor = buildPublicPostCursor(last.CreatedAt, last.ID)
+	}
+	return posts, nextCursor, nil
+}
+
+func (s *Server) listTopRoomsForPersona(ctx context.Context, personaID string, limit int) ([]PublicRoomStat, error) {
+	if limit <= 0 {
+		limit = 3
+	}
+	if limit > 10 {
+		limit = 10
+	}
+
+	rows, err := s.db.Query(ctx, `
+		SELECT r.id::text, r.name, COUNT(*)::int AS post_count
+		FROM posts p
+		JOIN rooms r ON r.id = p.room_id
+		WHERE p.persona_id = $1
+		  AND p.status = 'PUBLISHED'
+		GROUP BY r.id, r.name
+		ORDER BY post_count DESC, r.name ASC
+		LIMIT $2
+	`, personaID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	rooms := make([]PublicRoomStat, 0, limit)
+	for rows.Next() {
+		var room PublicRoomStat
+		if err := rows.Scan(&room.RoomID, &room.RoomName, &room.PostCount); err != nil {
+			return nil, err
+		}
+		rooms = append(rooms, room)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return rooms, nil
+}
+
+func (s *Server) ensureUniquePublicProfileSlug(ctx context.Context, baseSlug, personaID string) (string, error) {
+	base := normalizePublicSlug(baseSlug)
+	if base == "" {
+		base = "persona"
+	}
+
+	candidate := base
+	for i := 0; i < 200; i++ {
+		var existingPersonaID string
+		err := s.db.QueryRow(ctx, `
+			SELECT persona_id::text
+			FROM persona_public_profiles
+			WHERE slug = $1
+		`, candidate).Scan(&existingPersonaID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return candidate, nil
+		}
+		if err != nil {
+			return "", err
+		}
+		if strings.TrimSpace(existingPersonaID) == strings.TrimSpace(personaID) {
+			return candidate, nil
+		}
+		candidate = fmt.Sprintf("%s-%d", base, i+2)
+	}
+	return "", fmt.Errorf("could not allocate slug")
+}
+
+func normalizePublicSlug(value string) string {
+	raw := strings.ToLower(strings.TrimSpace(value))
+	if raw == "" {
+		return ""
+	}
+
+	var b strings.Builder
+	prevDash := false
+	for _, r := range raw {
+		isASCIIAlpha := r >= 'a' && r <= 'z'
+		isASCIIDigit := r >= '0' && r <= '9'
+		if isASCIIAlpha || isASCIIDigit {
+			b.WriteRune(r)
+			prevDash = false
+			continue
+		}
+
+		if unicode.IsSpace(r) || r == '-' || r == '_' {
+			if !prevDash && b.Len() > 0 {
+				b.WriteRune('-')
+				prevDash = true
+			}
+		}
+	}
+
+	slug := strings.Trim(b.String(), "-")
+	if len(slug) > 64 {
+		slug = strings.Trim(slug[:64], "-")
+	}
+	return slug
+}
+
+func buildPublicProfileBadges(profile PublicPersonaProfile) []string {
+	badges := []string{"Public Persona"}
+
+	language := strings.ToUpper(strings.TrimSpace(profile.PreferredLanguage))
+	if language != "" {
+		badges = append(badges, language)
+	}
+
+	tone := strings.TrimSpace(profile.Tone)
+	if tone != "" {
+		badges = append(badges, "Tone: "+tone)
+	}
+
+	if profile.Formality >= 2 {
+		badges = append(badges, "Formal")
+	} else {
+		badges = append(badges, "Conversational")
+	}
+	return badges
+}
+
+func buildPublicPostCursor(createdAt time.Time, postID string) string {
+	return fmt.Sprintf("%d|%s", createdAt.UTC().UnixNano(), strings.TrimSpace(postID))
+}
+
+func parsePublicPostCursor(cursor string) (time.Time, string, error) {
+	parts := strings.SplitN(strings.TrimSpace(cursor), "|", 2)
+	if len(parts) != 2 {
+		return time.Time{}, "", fmt.Errorf("invalid cursor")
+	}
+
+	nanos, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil {
+		return time.Time{}, "", fmt.Errorf("invalid cursor")
+	}
+	postID := strings.TrimSpace(parts[1])
+	if postID == "" || len(postID) != 36 {
+		return time.Time{}, "", fmt.Errorf("invalid cursor")
+	}
+	return time.Unix(0, nanos).UTC(), postID, nil
 }
 
 func (s *Server) personaOwnedByUser(ctx context.Context, userID, personaID string) (bool, error) {

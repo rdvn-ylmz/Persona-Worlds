@@ -21,6 +21,7 @@ import {
   listRoomPosts,
   listRooms,
   login,
+  publishPersonaProfile,
   previewPersona,
   signup,
   updatePersona
@@ -437,6 +438,34 @@ export default function HomePage() {
     }
   }
 
+  async function onSharePersona() {
+    if (!token || !selectedPersonaId) {
+      setError('select a persona first');
+      return;
+    }
+
+    try {
+      setLoading(true);
+      setError('');
+      const published = await publishPersonaProfile(token, selectedPersonaId);
+      const fallbackLink = typeof window !== 'undefined' ? `${window.location.origin}/p/${published.slug}` : '';
+      const shareLink = published.share_url || fallbackLink;
+
+      if (shareLink && navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(shareLink);
+        setMessage(`Public profile link copied: ${shareLink}`);
+      } else if (shareLink) {
+        setMessage(`Public profile ready: ${shareLink}`);
+      } else {
+        setMessage('Public profile published.');
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'could not publish public profile');
+    } finally {
+      setLoading(false);
+    }
+  }
+
   if (!token) {
     return (
       <main className="container">
@@ -480,6 +509,9 @@ export default function HomePage() {
           <p>Interest room: {selectedRoom?.name || 'Select a room'}</p>
         </div>
         <div className="header-actions">
+          <button className="secondary" onClick={onSharePersona} disabled={loading || !selectedPersonaId}>
+            Share
+          </button>
           <button onClick={onCreateDraft} disabled={loading || !selectedRoomId || !selectedPersonaId}>
             Create AI Draft
           </button>

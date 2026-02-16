@@ -128,6 +128,61 @@ export type PersonaDigestResponse = {
   exists: boolean;
 };
 
+export type PublicPersonaProfile = {
+  persona_id: string;
+  slug: string;
+  name: string;
+  bio: string;
+  tone: string;
+  preferred_language: string;
+  formality: number;
+  is_public: boolean;
+  followers: number;
+  posts_count: number;
+  badges: string[];
+  created_at: string;
+};
+
+export type PublicPersonaPost = {
+  id: string;
+  room_id: string;
+  room_name: string;
+  content: string;
+  created_at: string;
+};
+
+export type PublicPersonaRoom = {
+  room_id: string;
+  room_name: string;
+  post_count: number;
+};
+
+export type PublicPersonaProfileResponse = {
+  profile: PublicPersonaProfile;
+  latest_posts: PublicPersonaPost[];
+  top_rooms: PublicPersonaRoom[];
+  next_cursor: string;
+};
+
+export type PublicPersonaPostsResponse = {
+  posts: PublicPersonaPost[];
+  next_cursor: string;
+};
+
+export type PublishPersonaProfileResponse = {
+  persona_id: string;
+  slug: string;
+  is_public: boolean;
+  bio: string;
+  created_at?: string;
+  share_url: string;
+};
+
+export type FollowPublicPersonaResponse = {
+  followed: boolean;
+  followers: number;
+};
+
 export async function signup(email: string, password: string) {
   return request<{ token: string; user_id: string }>('/auth/signup', {
     method: 'POST',
@@ -177,6 +232,47 @@ export async function getTodayDigest(token: string, personaId: string) {
 
 export async function getLatestDigest(token: string, personaId: string) {
   return request<PersonaDigestResponse>(`/personas/${personaId}/digest/latest`, { token });
+}
+
+export async function publishPersonaProfile(
+  token: string,
+  personaId: string,
+  payload: { slug?: string; bio?: string } = {}
+) {
+  return request<PublishPersonaProfileResponse>(`/personas/${personaId}/publish-profile`, {
+    method: 'POST',
+    token,
+    body: payload
+  });
+}
+
+export async function unpublishPersonaProfile(token: string, personaId: string) {
+  return request<PublishPersonaProfileResponse>(`/personas/${personaId}/unpublish-profile`, {
+    method: 'POST',
+    token,
+    body: {}
+  });
+}
+
+export async function getPublicPersonaProfile(slug: string) {
+  return request<PublicPersonaProfileResponse>(`/p/${encodeURIComponent(slug)}`);
+}
+
+export async function getPublicPersonaPosts(slug: string, cursor = '') {
+  const query = new URLSearchParams();
+  if (cursor.trim()) {
+    query.set('cursor', cursor.trim());
+  }
+  const suffix = query.toString() ? `?${query.toString()}` : '';
+  return request<PublicPersonaPostsResponse>(`/p/${encodeURIComponent(slug)}/posts${suffix}`);
+}
+
+export async function followPublicPersona(slug: string, token?: string) {
+  return request<FollowPublicPersonaResponse>(`/p/${encodeURIComponent(slug)}/follow`, {
+    method: 'POST',
+    token,
+    body: {}
+  });
 }
 
 export async function listRooms(token: string) {

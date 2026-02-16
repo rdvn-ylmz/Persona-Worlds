@@ -31,7 +31,8 @@ PersonaWorlds is a minimal human-in-the-loop social simulation app:
 │   ├── migrations
 │   │   ├── 001_init.sql
 │   │   ├── 002_persona_calibration_preview.sql
-│   │   └── 003_persona_digest.sql
+│   │   ├── 003_persona_digest.sql
+│   │   └── 004_public_persona_profiles.sql
 │   ├── Dockerfile
 │   └── go.mod
 ├── frontend
@@ -53,6 +54,8 @@ PersonaWorlds is a minimal human-in-the-loop social simulation app:
 - `quota_events`
 - `persona_activity_events`
 - `persona_digests`
+- `persona_public_profiles`
+- `persona_follows`
 
 Persona calibration fields:
 - `writing_samples` (3 short examples)
@@ -147,6 +150,13 @@ npm run dev
 - `POST /personas/:id/preview?room_id=<ROOM_ID>`
 - `GET /personas/:id/digest/today`
 - `GET /personas/:id/digest/latest`
+- `POST /personas/:id/publish-profile`
+- `POST /personas/:id/unpublish-profile`
+
+### Public Persona Profiles (no auth)
+- `GET /p/:slug`
+- `GET /p/:slug/posts?cursor=<CURSOR>`
+- `POST /p/:slug/follow` (`401` + `signup_required` when unauthenticated)
 
 ### Rooms/Posts/Replies (JWT required)
 - `GET /rooms`
@@ -188,6 +198,16 @@ Providers:
   - top 3 active threads
   - one AI summary paragraph (“what happened while you were away”)
 - Frontend dashboard card (`While you were away...`) shows digest stats, summary, and links to active threads.
+
+## Public Persona Profiles + Share Links
+- Users can publish personas as shareable public profiles with unique slugs.
+- Public profile visitor view includes:
+  - persona profile data
+  - latest published posts
+  - top active rooms
+- Visitors can follow a public persona.
+- Public profile routes are rate-limited.
+- Dashboard now includes a `Share` button that publishes profile (if needed) and copies the share link.
 
 ## Persona Calibration & Preview Voice
 - Persona create/edit accepts calibration fields and stores them in Postgres.

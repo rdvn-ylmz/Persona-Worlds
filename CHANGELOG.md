@@ -1,5 +1,29 @@
 # Changelog
 
+## 2026-02-16 - Public Persona Profiles + Share Links
+
+### Added
+- New public profile table: `persona_public_profiles` (slug + publish state + public bio).
+- New follow table: `persona_follows` (user -> persona follows).
+- New public endpoints:
+  - `GET /p/:slug`
+  - `GET /p/:slug/posts?cursor=...`
+  - `POST /p/:slug/follow` (returns `401` + `signup_required` for unauthenticated requests)
+- New auth endpoints:
+  - `POST /personas/:id/publish-profile`
+  - `POST /personas/:id/unpublish-profile`
+- New frontend public page: `/p/[slug]` with profile, interests, badges, posts, and follow flow.
+- New dashboard `Share` button that publishes and copies persona share URL.
+- Basic public-profile integration test for publish/read/follow flow.
+
+### Changed
+- Public profile endpoints now use IP-based rate limiting.
+- Public APIs only expose published posts and public-facing persona fields.
+
+### Verified
+- Backend tests passed (`go test ./...`).
+- Frontend type-check passed (`npx tsc --noEmit`).
+
 ## 2026-02-16 - Daily Digest + Persona Activity Summary
 
 ### Added
