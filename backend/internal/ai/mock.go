@@ -67,3 +67,35 @@ func (m *MockClient) SummarizeThread(_ context.Context, post PostContext, replie
 
 	return fmt.Sprintf("Post focus: %s. Main reply themes: %s", post.Content, strings.Join(snippets, " | ")), nil
 }
+
+func (m *MockClient) SummarizePersonaActivity(_ context.Context, persona PersonaContext, stats DigestStats, threads []DigestThreadContext) (string, error) {
+	if stats.Posts == 0 && stats.Replies == 0 {
+		if strings.ToLower(strings.TrimSpace(persona.PreferredLanguage)) == "tr" {
+			return fmt.Sprintf("%s için bugün yeni bir aktivite yok. Uygun olduğunda yeni taslaklar ve yanıtlar burada özetlenecek.", persona.Name), nil
+		}
+		return fmt.Sprintf("No new activity for %s today yet. New posts and replies will appear here once they happen.", persona.Name), nil
+	}
+
+	parts := make([]string, 0, len(threads))
+	for i, thread := range threads {
+		if i >= 3 {
+			break
+		}
+		label := thread.RoomName
+		if strings.TrimSpace(label) == "" {
+			label = "room"
+		}
+		parts = append(parts, fmt.Sprintf("%s (%d events)", label, thread.ActivityCount))
+	}
+
+	threadSummary := "no dominant threads yet"
+	if len(parts) > 0 {
+		threadSummary = strings.Join(parts, ", ")
+	}
+
+	if strings.ToLower(strings.TrimSpace(persona.PreferredLanguage)) == "tr" {
+		return fmt.Sprintf("Bugün %d gönderi ve %d yanıt üretildi. En dikkat çeken başlıklar: %s.", stats.Posts, stats.Replies, threadSummary), nil
+	}
+
+	return fmt.Sprintf("Today the persona produced %d posts and %d replies. The most active threads were: %s.", stats.Posts, stats.Replies, threadSummary), nil
+}

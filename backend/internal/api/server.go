@@ -82,6 +82,34 @@ type PreviewDraft struct {
 	AuthoredBy string `json:"authored_by"`
 }
 
+type DigestThread struct {
+	PostID        string    `json:"post_id"`
+	RoomID        string    `json:"room_id,omitempty"`
+	RoomName      string    `json:"room_name,omitempty"`
+	PostPreview   string    `json:"post_preview,omitempty"`
+	ActivityCount int       `json:"activity_count"`
+	LastActivity  time.Time `json:"last_activity_at"`
+}
+
+type DigestStats struct {
+	Posts      int            `json:"posts"`
+	Replies    int            `json:"replies"`
+	TopThreads []DigestThread `json:"top_threads"`
+}
+
+type PersonaDigest struct {
+	PersonaID   string      `json:"persona_id"`
+	Date        string      `json:"date"`
+	Summary     string      `json:"summary"`
+	Stats       DigestStats `json:"stats"`
+	HasActivity bool        `json:"has_activity"`
+	UpdatedAt   time.Time   `json:"updated_at"`
+}
+
+type dbExecutor interface {
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+}
+
 func New(cfg config.Config, db *pgxpool.Pool, llm ai.LLMClient) *Server {
 	return &Server{cfg: cfg, db: db, llm: llm}
 }
@@ -118,6 +146,8 @@ func (s *Server) Router() http.Handler {
 		r.Put("/personas/{id}", s.handleUpdatePersona)
 		r.Delete("/personas/{id}", s.handleDeletePersona)
 		r.Post("/personas/{id}/preview", s.handlePreviewPersona)
+		r.Get("/personas/{id}/digest/today", s.handleGetTodayDigest)
+		r.Get("/personas/{id}/digest/latest", s.handleGetLatestDigest)
 
 		r.Get("/rooms", s.handleListRooms)
 		r.Get("/rooms/{id}/posts", s.handleListRoomPosts)
@@ -497,6 +527,72 @@ func (s *Server) handlePreviewPersona(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) handleGetTodayDigest(w http.ResponseWriter, r *http.Request) {
+	userID, ok := auth.UserIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "missing user")
+		return
+	}
+	personaID := chi.URLParam(r, "id")
+
+	owned, err := s.personaOwnedByUser(r.Context(), userID, personaID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not check persona")
+		return
+	}
+	if !owned {
+		writeError(w, http.StatusNotFound, "persona not found")
+		return
+	}
+
+	digest, exists, err := s.getDigestForDate(r.Context(), personaID, time.Now().UTC())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not load digest")
+		return
+	}
+	if !exists {
+		digest = emptyDigest(personaID, time.Now().UTC())
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"digest": digest,
+		"exists": exists,
+	})
+}
+
+func (s *Server) handleGetLatestDigest(w http.ResponseWriter, r *http.Request) {
+	userID, ok := auth.UserIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "missing user")
+		return
+	}
+	personaID := chi.URLParam(r, "id")
+
+	owned, err := s.personaOwnedByUser(r.Context(), userID, personaID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not check persona")
+		return
+	}
+	if !owned {
+		writeError(w, http.StatusNotFound, "persona not found")
+		return
+	}
+
+	digest, exists, err := s.getLatestDigest(r.Context(), personaID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not load digest")
+		return
+	}
+	if !exists {
+		digest = emptyDigest(personaID, time.Now().UTC())
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"digest": digest,
+		"exists": exists,
+	})
+}
+
 func (s *Server) handleListRooms(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.db.Query(r.Context(), `
 		SELECT id::text, slug, name, description, created_at
@@ -699,8 +795,15 @@ func (s *Server) handleApprovePost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	tx, err := s.db.Begin(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not start transaction")
+		return
+	}
+	defer tx.Rollback(r.Context())
+
 	var out Post
-	err = s.db.QueryRow(r.Context(), `
+	err = tx.QueryRow(r.Context(), `
 		UPDATE posts
 		SET content=$1, status='PUBLISHED', authored_by='AI_DRAFT_APPROVED', published_at=NOW(), updated_at=NOW()
 		WHERE id=$2
@@ -709,6 +812,27 @@ func (s *Server) handleApprovePost(w http.ResponseWriter, r *http.Request) {
 		Scan(&out.ID, &out.RoomID, &out.PersonaID, &out.AuthoredBy, &out.Status, &out.Content, &out.CreatedAt, &out.UpdatedAt)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "could not approve post")
+		return
+	}
+
+	if strings.TrimSpace(out.PersonaID) != "" {
+		metadata := map[string]any{
+			"post_id":      out.ID,
+			"room_id":      out.RoomID,
+			"post_preview": truncateText(out.Content, 220),
+		}
+		if err := insertPersonaActivityEvent(r.Context(), tx, out.PersonaID, "post_created", metadata); err != nil {
+			writeError(w, http.StatusInternalServerError, "could not record activity")
+			return
+		}
+		if err := insertPersonaActivityEvent(r.Context(), tx, out.PersonaID, "thread_participated", metadata); err != nil {
+			writeError(w, http.StatusInternalServerError, "could not record activity")
+			return
+		}
+	}
+
+	if err := tx.Commit(r.Context()); err != nil {
+		writeError(w, http.StatusInternalServerError, "could not commit post approval")
 		return
 	}
 
@@ -973,6 +1097,136 @@ func (s *Server) resolvePersonaIDsForReplyGeneration(ctx context.Context, userID
 		return nil, fmt.Errorf("no personas available")
 	}
 	return ids, nil
+}
+
+func (s *Server) personaOwnedByUser(ctx context.Context, userID, personaID string) (bool, error) {
+	var exists bool
+	err := s.db.QueryRow(ctx, `
+		SELECT EXISTS(
+			SELECT 1
+			FROM personas
+			WHERE id = $1 AND user_id = $2
+		)
+	`, personaID, userID).Scan(&exists)
+	return exists, err
+}
+
+func (s *Server) getDigestForDate(ctx context.Context, personaID string, date time.Time) (PersonaDigest, bool, error) {
+	var (
+		digest PersonaDigest
+		stats  []byte
+		rawDay time.Time
+	)
+
+	err := s.db.QueryRow(ctx, `
+		SELECT persona_id::text, date, summary, stats, updated_at
+		FROM persona_digests
+		WHERE persona_id = $1
+		  AND date = $2::date
+	`, personaID, date.Format("2006-01-02")).Scan(&digest.PersonaID, &rawDay, &digest.Summary, &stats, &digest.UpdatedAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return PersonaDigest{}, false, nil
+		}
+		return PersonaDigest{}, false, err
+	}
+
+	digest.Date = rawDay.UTC().Format("2006-01-02")
+	if err := hydrateDigestStats(&digest, stats); err != nil {
+		return PersonaDigest{}, false, err
+	}
+	return digest, true, nil
+}
+
+func (s *Server) getLatestDigest(ctx context.Context, personaID string) (PersonaDigest, bool, error) {
+	var (
+		digest PersonaDigest
+		stats  []byte
+		rawDay time.Time
+	)
+
+	err := s.db.QueryRow(ctx, `
+		SELECT persona_id::text, date, summary, stats, updated_at
+		FROM persona_digests
+		WHERE persona_id = $1
+		ORDER BY date DESC
+		LIMIT 1
+	`, personaID).Scan(&digest.PersonaID, &rawDay, &digest.Summary, &stats, &digest.UpdatedAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return PersonaDigest{}, false, nil
+		}
+		return PersonaDigest{}, false, err
+	}
+
+	digest.Date = rawDay.UTC().Format("2006-01-02")
+	if err := hydrateDigestStats(&digest, stats); err != nil {
+		return PersonaDigest{}, false, err
+	}
+	return digest, true, nil
+}
+
+func hydrateDigestStats(digest *PersonaDigest, statsRaw []byte) error {
+	digest.Stats = DigestStats{
+		TopThreads: []DigestThread{},
+	}
+	if len(statsRaw) > 0 {
+		if err := json.Unmarshal(statsRaw, &digest.Stats); err != nil {
+			return err
+		}
+	}
+	if digest.Stats.TopThreads == nil {
+		digest.Stats.TopThreads = []DigestThread{}
+	}
+	digest.HasActivity = digest.Stats.Posts > 0 || digest.Stats.Replies > 0 || len(digest.Stats.TopThreads) > 0
+	if strings.TrimSpace(digest.Summary) == "" && !digest.HasActivity {
+		digest.Summary = "No activity yet today. Once the persona posts or replies, this digest will update."
+	}
+	return nil
+}
+
+func emptyDigest(personaID string, date time.Time) PersonaDigest {
+	return PersonaDigest{
+		PersonaID: personaID,
+		Date:      date.UTC().Format("2006-01-02"),
+		Summary:   "No activity yet today. Once the persona posts or replies, this digest will update.",
+		Stats: DigestStats{
+			Posts:      0,
+			Replies:    0,
+			TopThreads: []DigestThread{},
+		},
+		HasActivity: false,
+		UpdatedAt:   time.Now().UTC(),
+	}
+}
+
+func insertPersonaActivityEvent(ctx context.Context, executor dbExecutor, personaID, eventType string, metadata map[string]any) error {
+	if metadata == nil {
+		metadata = map[string]any{}
+	}
+	raw, err := json.Marshal(metadata)
+	if err != nil {
+		return err
+	}
+
+	_, err = executor.Exec(ctx, `
+		INSERT INTO persona_activity_events(persona_id, type, metadata)
+		VALUES ($1, $2, $3::jsonb)
+	`, personaID, eventType, raw)
+	return err
+}
+
+func truncateText(value string, maxRunes int) string {
+	trimmed := strings.TrimSpace(value)
+	if maxRunes <= 0 {
+		return trimmed
+	}
+
+	runes := []rune(trimmed)
+	if len(runes) <= maxRunes {
+		return trimmed
+	}
+	return strings.TrimSpace(string(runes[:maxRunes]))
 }
 
 type rowScanner interface {

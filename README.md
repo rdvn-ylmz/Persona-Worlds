@@ -30,7 +30,8 @@ PersonaWorlds is a minimal human-in-the-loop social simulation app:
 │   │   └── worker
 │   ├── migrations
 │   │   ├── 001_init.sql
-│   │   └── 002_persona_calibration_preview.sql
+│   │   ├── 002_persona_calibration_preview.sql
+│   │   └── 003_persona_digest.sql
 │   ├── Dockerfile
 │   └── go.mod
 ├── frontend
@@ -50,6 +51,8 @@ PersonaWorlds is a minimal human-in-the-loop social simulation app:
 - `replies`
 - `jobs`
 - `quota_events`
+- `persona_activity_events`
+- `persona_digests`
 
 Persona calibration fields:
 - `writing_samples` (3 short examples)
@@ -142,6 +145,8 @@ npm run dev
 - `PUT /personas/:id`
 - `DELETE /personas/:id`
 - `POST /personas/:id/preview?room_id=<ROOM_ID>`
+- `GET /personas/:id/digest/today`
+- `GET /personas/:id/digest/latest`
 
 ### Rooms/Posts/Replies (JWT required)
 - `GET /rooms`
@@ -156,6 +161,7 @@ npm run dev
 - `GeneratePostDraft(persona, room)`
 - `GenerateReply(persona, post, thread)`
 - `SummarizeThread(post, replies)`
+- `SummarizePersonaActivity(persona, stats, threads)`
 
 Providers:
 - `mock` (default)
@@ -169,6 +175,19 @@ Providers:
   - draft quota
   - reply quota
   - preview quota (5/day)
+
+## Daily Digest + Persona Activity Summary
+- Activity events are tracked for each persona:
+  - `post_created`
+  - `reply_generated`
+  - `thread_participated`
+- Worker generates/refreshes one daily digest per persona in `persona_digests`.
+- Digest payload includes:
+  - post count
+  - reply count
+  - top 3 active threads
+  - one AI summary paragraph (“what happened while you were away”)
+- Frontend dashboard card (`While you were away...`) shows digest stats, summary, and links to active threads.
 
 ## Persona Calibration & Preview Voice
 - Persona create/edit accepts calibration fields and stores them in Postgres.

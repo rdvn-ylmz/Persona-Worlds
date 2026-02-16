@@ -101,6 +101,33 @@ export type PreviewResponse = {
   };
 };
 
+export type DigestThread = {
+  post_id: string;
+  room_id?: string;
+  room_name?: string;
+  post_preview?: string;
+  activity_count: number;
+  last_activity_at: string;
+};
+
+export type PersonaDigest = {
+  persona_id: string;
+  date: string;
+  summary: string;
+  has_activity: boolean;
+  updated_at: string;
+  stats: {
+    posts: number;
+    replies: number;
+    top_threads: DigestThread[];
+  };
+};
+
+export type PersonaDigestResponse = {
+  digest: PersonaDigest;
+  exists: boolean;
+};
+
 export async function signup(email: string, password: string) {
   return request<{ token: string; user_id: string }>('/auth/signup', {
     method: 'POST',
@@ -142,6 +169,14 @@ export async function previewPersona(token: string, personaId: string, roomId: s
     token,
     body: {}
   });
+}
+
+export async function getTodayDigest(token: string, personaId: string) {
+  return request<PersonaDigestResponse>(`/personas/${personaId}/digest/today`, { token });
+}
+
+export async function getLatestDigest(token: string, personaId: string) {
+  return request<PersonaDigestResponse>(`/personas/${personaId}/digest/latest`, { token });
 }
 
 export async function listRooms(token: string) {

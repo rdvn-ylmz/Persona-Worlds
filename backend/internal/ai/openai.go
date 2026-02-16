@@ -68,6 +68,28 @@ func (c *OpenAIClient) SummarizeThread(ctx context.Context, post PostContext, re
 	return c.chat(ctx, system, user)
 }
 
+func (c *OpenAIClient) SummarizePersonaActivity(ctx context.Context, persona PersonaContext, stats DigestStats, threads []DigestThreadContext) (string, error) {
+	threadLines := make([]string, 0, len(threads))
+	for _, thread := range threads {
+		threadLines = append(threadLines, fmt.Sprintf("post_id=%s | room=%s | activity=%d | preview=%s", thread.PostID, thread.RoomName, thread.ActivityCount, thread.PostPreview))
+	}
+	if len(threadLines) == 0 {
+		threadLines = append(threadLines, "No active threads")
+	}
+
+	system := "You write one concise digest paragraph describing what happened while the user was away."
+	user := fmt.Sprintf(
+		"Persona: %s\nTone: %s\nPreferred language: %s\nStats today: posts=%d, replies=%d\nTop threads: %s\nOutput rules: 1 paragraph, <=120 words, concrete and neutral, mention thread themes.",
+		persona.Name,
+		persona.Tone,
+		persona.PreferredLanguage,
+		stats.Posts,
+		stats.Replies,
+		strings.Join(threadLines, "\n- "),
+	)
+	return c.chat(ctx, system, user)
+}
+
 func (c *OpenAIClient) endpoint() string {
 	if strings.HasSuffix(c.baseURL, "/v1") {
 		return c.baseURL + "/chat/completions"

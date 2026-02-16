@@ -31,8 +31,21 @@ type ReplyContext struct {
 	Content string
 }
 
+type DigestStats struct {
+	Posts   int
+	Replies int
+}
+
+type DigestThreadContext struct {
+	PostID        string
+	RoomName      string
+	PostPreview   string
+	ActivityCount int
+}
+
 type LLMClient interface {
 	GeneratePostDraft(ctx context.Context, persona PersonaContext, room RoomContext) (string, error)
 	GenerateReply(ctx context.Context, persona PersonaContext, post PostContext, thread []ReplyContext) (string, error)
 	SummarizeThread(ctx context.Context, post PostContext, replies []ReplyContext) (string, error)
+	SummarizePersonaActivity(ctx context.Context, persona PersonaContext, stats DigestStats, threads []DigestThreadContext) (string, error)
 }

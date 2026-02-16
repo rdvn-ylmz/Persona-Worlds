@@ -2,7 +2,9 @@
 
 import { FormEvent, useEffect, useMemo, useState } from 'react';
 import {
+  DigestThread,
   Persona,
+  PersonaDigestResponse,
   PersonaPayload,
   Post,
   PreviewResponse,
@@ -12,6 +14,8 @@ import {
   createDraft,
   createPersona,
   generateReplies,
+  getLatestDigest,
+  getTodayDigest,
   getThread,
   listPersonas,
   listRoomPosts,
@@ -68,6 +72,9 @@ export default function HomePage() {
 
   const [previewDrafts, setPreviewDrafts] = useState<PreviewResponse['drafts']>([]);
   const [previewQuota, setPreviewQuota] = useState<PreviewResponse['quota'] | null>(null);
+  const [digestResponse, setDigestResponse] = useState<PersonaDigestResponse | null>(null);
+  const [digestLoading, setDigestLoading] = useState(false);
+  const [digestSource, setDigestSource] = useState<'today' | 'latest' | 'empty'>('empty');
 
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState('');
@@ -75,6 +82,7 @@ export default function HomePage() {
 
   const selectedRoom = useMemo(() => rooms.find((r) => r.id === selectedRoomId), [rooms, selectedRoomId]);
   const selectedPersona = useMemo(() => personas.find((p) => p.id === selectedPersonaId), [personas, selectedPersonaId]);
+  const activeDigest = digestResponse?.digest ?? null;
 
   useEffect(() => {
     const stored = localStorage.getItem(TOKEN_KEY);
@@ -88,6 +96,8 @@ export default function HomePage() {
       setPersonas([]);
       setRooms([]);
       setPosts([]);
+      setDigestResponse(null);
+      setDigestSource('empty');
       return;
     }
 
@@ -117,6 +127,15 @@ export default function HomePage() {
     setDraftQuota(selectedPersona.daily_draft_quota);
     setReplyQuota(selectedPersona.daily_reply_quota);
   }, [selectedPersona]);
+
+  useEffect(() => {
+    if (!token || !selectedPersonaId) {
+      setDigestResponse(null);
+      setDigestSource('empty');
+      return;
+    }
+    void refreshDigest(token, selectedPersonaId);
+  }, [token, selectedPersonaId]);
 
   useEffect(() => {
     setPreviewDrafts([]);
@@ -154,6 +173,30 @@ export default function HomePage() {
       setError(err instanceof Error ? err.message : 'could not load posts');
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function refreshDigest(authToken: string, personaId: string) {
+    try {
+      setDigestLoading(true);
+      const today = await getTodayDigest(authToken, personaId);
+      if (today.exists) {
+        setDigestResponse(today);
+        setDigestSource('today');
+        return;
+      }
+      const latest = await getLatestDigest(authToken, personaId);
+      if (latest.exists) {
+        setDigestResponse(latest);
+        setDigestSource('latest');
+      } else {
+        setDigestResponse(today);
+        setDigestSource('empty');
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'could not load digest');
+    } finally {
+      setDigestLoading(false);
     }
   }
 
@@ -217,6 +260,8 @@ export default function HomePage() {
     setThreads({});
     setPreviewDrafts([]);
     setPreviewQuota(null);
+    setDigestResponse(null);
+    setDigestSource('empty');
     setMessage('Logged out.');
   }
 
@@ -322,6 +367,10 @@ export default function HomePage() {
       const updated = await approvePost(token, postId);
       setPosts((current) => current.map((post) => (post.id === postId ? { ...post, ...updated } : post)));
       setMessage('Draft approved and published.');
+      const digestPersonaId = updated.persona_id || selectedPersonaId;
+      if (digestPersonaId) {
+        void refreshDigest(token, digestPersonaId);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'could not approve post');
     } finally {
@@ -359,6 +408,30 @@ export default function HomePage() {
       setThreads((current) => ({ ...current, [postId]: thread }));
     } catch (err) {
       setError(err instanceof Error ? err.message : 'could not load thread');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function onOpenDigestThread(thread: DigestThread) {
+    if (!token) {
+      return;
+    }
+
+    try {
+      setLoading(true);
+      setError('');
+      if (thread.room_id && thread.room_id !== selectedRoomId) {
+        const roomPosts = await listRoomPosts(token, thread.room_id);
+        setSelectedRoomId(thread.room_id);
+        setPosts(roomPosts.posts);
+      }
+
+      const threadData = await getThread(token, thread.post_id);
+      setThreads((current) => ({ ...current, [thread.post_id]: threadData }));
+      setMessage('Digest thread loaded.');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'could not load digest thread');
     } finally {
       setLoading(false);
     }
@@ -415,6 +488,75 @@ export default function HomePage() {
           </button>
         </div>
       </header>
+
+      <section className="panel digest-panel stack">
+        <div className="digest-header">
+          <div>
+            <h2>While you were away...</h2>
+            <p className="subtle">Persona activity summary</p>
+          </div>
+          <button
+            className="secondary"
+            onClick={() => {
+              if (token && selectedPersonaId) {
+                void refreshDigest(token, selectedPersonaId);
+              }
+            }}
+            disabled={digestLoading || !selectedPersonaId}
+          >
+            Refresh Digest
+          </button>
+        </div>
+
+        {!selectedPersonaId && <p className="subtle">Select a persona to view digest details.</p>}
+        {selectedPersonaId && digestLoading && <p className="subtle">Loading digest...</p>}
+        {selectedPersonaId && !digestLoading && (!activeDigest || !activeDigest.has_activity) && (
+          <p className="subtle">No activity yet today. Once this persona posts or replies, this card will update.</p>
+        )}
+
+        {selectedPersonaId && !digestLoading && activeDigest && activeDigest.has_activity && (
+          <>
+            {digestSource === 'latest' && (
+              <p className="subtle">Showing latest available digest from {activeDigest.date}.</p>
+            )}
+            <div className="digest-stats">
+              <div className="mini-card digest-stat">
+                <strong>{activeDigest.stats.posts}</strong>
+                <span>Posts</span>
+              </div>
+              <div className="mini-card digest-stat">
+                <strong>{activeDigest.stats.replies}</strong>
+                <span>Replies</span>
+              </div>
+              <div className="mini-card digest-stat">
+                <strong>{activeDigest.stats.top_threads.length}</strong>
+                <span>Top Threads</span>
+              </div>
+            </div>
+            <p>{activeDigest.summary}</p>
+
+            {activeDigest.stats.top_threads.length > 0 && (
+              <div className="digest-thread-list">
+                {activeDigest.stats.top_threads.map((thread) => (
+                  <a
+                    key={thread.post_id}
+                    href={`#post-${thread.post_id}`}
+                    className="digest-thread-link"
+                    onClick={(event) => {
+                      event.preventDefault();
+                      void onOpenDigestThread(thread);
+                    }}
+                  >
+                    <strong>{thread.room_name || 'Thread'}</strong>
+                    <span>{thread.post_preview || 'Open thread'}</span>
+                    <span className="subtle">Activity events: {thread.activity_count}</span>
+                  </a>
+                ))}
+              </div>
+            )}
+          </>
+        )}
+      </section>
 
       <section className="grid">
         <aside className="panel stack">
@@ -561,7 +703,7 @@ export default function HomePage() {
             {posts.map((post) => {
               const thread = threads[post.id];
               return (
-                <article key={post.id} className="post-card">
+                <article id={`post-${post.id}`} key={post.id} className="post-card">
                   <div className="post-meta">
                     <Badge authoredBy={post.authored_by} />
                     <span className="status">{post.status}</span>
