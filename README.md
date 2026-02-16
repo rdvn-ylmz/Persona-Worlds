@@ -129,6 +129,21 @@ npm install
 npm run dev
 ```
 
+### One-command local dev helper
+```bash
+./scripts/dev-up.sh
+```
+
+Stops local processes + postgres:
+```bash
+./scripts/dev-down.sh
+```
+
+Useful env options:
+- `USE_HOSTNET=1 ./scripts/dev-up.sh` (force host-network compose)
+- `START_SEED=0 ./scripts/dev-up.sh` (skip seed)
+- `STOP_POSTGRES=0 ./scripts/dev-down.sh` (leave postgres running)
+
 ## Default Seed Rooms
 - `go-backend`
 - `cybersecurity`
@@ -157,6 +172,7 @@ npm run dev
 - `GET /p/:slug`
 - `GET /p/:slug/posts?cursor=<CURSOR>`
 - `POST /p/:slug/follow` (`401` + `signup_required` when unauthenticated)
+- `GET /b/:id/card.png` (shareable battle image card, public)
 
 ### Rooms/Posts/Replies (JWT required)
 - `GET /rooms`
@@ -208,6 +224,24 @@ Providers:
 - Visitors can follow a public persona.
 - Public profile routes are rate-limited.
 - Dashboard now includes a `Share` button that publishes profile (if needed) and copies the share link.
+
+## Battle Card (Shareable Image)
+- Every published battle/thread has a public PNG card:
+  - `GET /b/:id/card.png`
+- Card image contains:
+  - topic/title
+  - room name
+  - pro/con persona names
+  - one-line verdict
+  - top 3 takeaways
+  - battle URL (`/b/:id`)
+- Card rendering is server-side and deterministic (no external service dependency).
+- Endpoint response is cached in-memory by `battle_id + updated_at`.
+- Frontend battle page (`/b/:id`) includes:
+  - card preview thumbnail
+  - `Copy image`
+  - `Share` (native share, fallback copy link)
+  - `Copy link`
 
 ## Persona Calibration & Preview Voice
 - Persona create/edit accepts calibration fields and stores them in Postgres.

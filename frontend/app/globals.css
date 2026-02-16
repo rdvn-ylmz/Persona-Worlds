@@ -364,6 +364,43 @@ label {
   margin: 60px auto;
 }
 
+.battle-card-page {
+  background: linear-gradient(120deg, #f8fbff 0%, #f3f8ff 100%);
+}
+
+.battle-card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.battle-card-actions {
+  align-items: center;
+}
+
+.battle-card-actions button,
+.battle-card-actions .cta-link {
+  width: auto;
+}
+
+.battle-card-preview {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 10px;
+  background: #fff;
+}
+
+.battle-card-preview img {
+  display: block;
+  width: 100%;
+  max-width: 520px;
+  margin: 0 auto;
+  border-radius: 8px;
+  border: 1px solid #dbe4ef;
+}
+
 @media (max-width: 900px) {
   .public-stats {
     grid-template-columns: 1fr;
@@ -388,6 +425,11 @@ label {
   }
 
   .header-actions {
+    width: 100%;
+  }
+
+  .battle-card-actions button,
+  .battle-card-actions .cta-link {
     width: 100%;
   }
 }

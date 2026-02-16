@@ -445,6 +445,13 @@ export default function HomePage() {
     }
   }
 
+  function onOpenBattleCard(postId: string) {
+    if (!postId || typeof window === 'undefined') {
+      return;
+    }
+    window.open(`/b/${encodeURIComponent(postId)}`, '_blank', 'noopener,noreferrer');
+  }
+
   async function onSharePersona() {
     if (!token || !selectedPersonaId) {
       setError('select a persona first');
@@ -771,6 +778,9 @@ export default function HomePage() {
                     )}
                     <button className="secondary" onClick={() => onLoadThread(post.id)} disabled={loading}>
                       Load Thread
+                    </button>
+                    <button className="secondary" onClick={() => onOpenBattleCard(post.id)} disabled={loading}>
+                      View Battle Card
                     </button>
                   </div>
 

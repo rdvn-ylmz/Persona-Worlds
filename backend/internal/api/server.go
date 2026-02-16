@@ -29,6 +29,7 @@ type Server struct {
 	llm                ai.LLMClient
 	publicReadLimiter  *ipRateLimiter
 	publicWriteLimiter *ipRateLimiter
+	battleCardCache    *battleCardCache
 }
 
 type Persona struct {
@@ -157,6 +158,7 @@ func New(cfg config.Config, db *pgxpool.Pool, llm ai.LLMClient) *Server {
 		llm:                llm,
 		publicReadLimiter:  newIPRateLimiter(120, time.Minute),
 		publicWriteLimiter: newIPRateLimiter(30, time.Minute),
+		battleCardCache:    newBattleCardCache(256),
 	}
 }
 
@@ -262,6 +264,8 @@ func (s *Server) Router() http.Handler {
 		r.With(s.publicReadRateLimitMiddleware).Get("/posts", s.handleGetPublicProfilePosts)
 		r.With(s.publicWriteRateLimitMiddleware).Post("/follow", s.handleFollowPublicProfile)
 	})
+
+	r.With(s.publicReadRateLimitMiddleware).Get("/b/{id}/card.png", s.handleGetBattleCardImage)
 
 	r.Group(func(r chi.Router) {
 		r.Use(auth.Middleware(s.cfg.JWTSecret))
