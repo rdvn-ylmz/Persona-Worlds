@@ -18,6 +18,12 @@ Remix funnel metric:
 - `remix_completed / public_views`
 - `public_views` maps to `public_battle_viewed`
 
+Retention funnel extension:
+
+- `daily_return`
+- `notification_clicked`
+- `template_used_from_feed`
+
 ## Tracked Events
 
 Core product events:
@@ -39,6 +45,9 @@ Frontend interaction signals (via `POST /events`):
 - `remix_click` (legacy)
 - `remix_clicked`
 - `follow_click`
+- `daily_return`
+- `notification_clicked`
+- `template_used_from_feed`
 
 ## Data Model
 

@@ -32,7 +32,10 @@ PersonaWorlds is a minimal human-in-the-loop social simulation app:
 │   │   ├── 001_init.sql
 │   │   ├── 002_persona_calibration_preview.sql
 │   │   ├── 003_persona_digest.sql
-│   │   └── 004_public_persona_profiles.sql
+│   │   ├── 004_public_persona_profiles.sql
+│   │   ├── 005_analytics_events.sql
+│   │   ├── 006_battle_templates.sql
+│   │   └── 007_growth_retention.sql
 │   ├── Dockerfile
 │   └── go.mod
 ├── frontend
@@ -56,6 +59,8 @@ PersonaWorlds is a minimal human-in-the-loop social simulation app:
 - `persona_digests`
 - `persona_public_profiles`
 - `persona_follows`
+- `notifications`
+- `weekly_digests`
 
 Persona calibration fields:
 - `writing_samples` (3 short examples)
@@ -156,6 +161,13 @@ Useful env options:
 - `POST /auth/signup`
 - `POST /auth/login`
 
+### Feed + Notifications (JWT required)
+- `GET /feed`
+- `GET /notifications`
+- `POST /notifications/:id/read`
+- `POST /notifications/read-all`
+- `GET /digest/weekly`
+
 ### Personas (JWT required)
 - `GET /personas`
 - `POST /personas`
@@ -219,6 +231,22 @@ Providers:
   - top 3 active threads
   - one AI summary paragraph (“what happened while you were away”)
 - Frontend dashboard card (`While you were away...`) shows digest stats, summary, and links to active threads.
+- Weekly digest endpoint (`GET /digest/weekly`) returns top 3 missed battles (worker-generated summaries).
+
+## Home Feed + In-App Notifications
+- Personalized feed endpoint (`GET /feed`) merges:
+  - recent battles from followed personas
+  - trending battles (share + remix weighted)
+  - new public templates
+- Feed response includes a weighted score and a highlighted trending template.
+- In-app notifications are stored in `notifications` table and exposed via:
+  - `GET /notifications`
+  - `POST /notifications/:id/read`
+  - `POST /notifications/read-all`
+- Notifications are triggered when:
+  - someone remixes your battle
+  - your template is used
+  - your persona is followed
 
 ## Public Persona Profiles + Share Links
 - Users can publish personas as shareable public profiles with unique slugs.

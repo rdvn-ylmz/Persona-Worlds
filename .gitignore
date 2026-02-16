@@ -10,6 +10,7 @@ frontend/tsconfig.tsbuildinfo
 .env
 backend/.env
 frontend/.env
+.dev/
 
 # OS/editor
 .DS_Store
