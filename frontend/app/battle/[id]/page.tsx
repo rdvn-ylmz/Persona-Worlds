@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import { useEffect, useMemo, useState } from 'react';
-import { Battle, getBattle } from '../../../lib/api';
+import { Battle, getBattle, regenerateBattle } from '../../../lib/api';
 
 const TOKEN_KEY = 'personaworlds_token';
 
@@ -88,6 +88,23 @@ export default function BattlePage() {
     }
   }
 
+  async function onRegenerateBattle() {
+    if (!token || !battleID) {
+      return;
+    }
+    try {
+      setRefreshing(true);
+      setError('');
+      const response = await regenerateBattle(token, battleID);
+      setMessage(response.requeued ? 'Battle requeued. Regenerating now.' : 'Battle regeneration requested.');
+      await loadBattle(token, battleID, false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'could not regenerate battle');
+    } finally {
+      setRefreshing(false);
+    }
+  }
+
   if (!token) {
     return (
       <main className="container">
@@ -142,6 +159,9 @@ export default function BattlePage() {
           <div className="battle-header-actions">
             <button className="secondary" onClick={onShare}>
               Share
+            </button>
+            <button className="secondary" onClick={onRegenerateBattle} disabled={refreshing}>
+              Regenerate Battle
             </button>
             <button
               className="secondary"

@@ -114,7 +114,7 @@ func TestGenerateBattleForOnePending(t *testing.T) {
 	}
 
 	var (
-		status    string
+		status     string
 		verdictRaw []byte
 	)
 	err = pool.QueryRow(ctx, `
@@ -140,6 +140,41 @@ func TestGenerateBattleForOnePending(t *testing.T) {
 	}
 	if turnCount != 6 {
 		t.Fatalf("expected 6 turns, got %d", turnCount)
+	}
+
+	rows, err := pool.Query(ctx, `
+		SELECT metadata
+		FROM battle_turns
+		WHERE battle_id = $1
+		ORDER BY turn_index ASC
+	`, battleID)
+	if err != nil {
+		t.Fatalf("query turn metadata failed: %v", err)
+	}
+	defer rows.Close()
+
+	seen := 0
+	for rows.Next() {
+		var metadataRaw []byte
+		if err := rows.Scan(&metadataRaw); err != nil {
+			t.Fatalf("scan metadata failed: %v", err)
+		}
+		var metadata struct {
+			QualityScore int `json:"quality_score"`
+		}
+		if err := json.Unmarshal(metadataRaw, &metadata); err != nil {
+			t.Fatalf("decode metadata failed: %v", err)
+		}
+		if metadata.QualityScore < 0 || metadata.QualityScore > 100 {
+			t.Fatalf("quality_score out of range: %d", metadata.QualityScore)
+		}
+		seen++
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate metadata rows failed: %v", err)
+	}
+	if seen != 6 {
+		t.Fatalf("expected 6 metadata rows, got %d", seen)
 	}
 
 	var verdict struct {

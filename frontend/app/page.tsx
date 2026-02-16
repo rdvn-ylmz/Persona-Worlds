@@ -1,7 +1,7 @@
 'use client';
 
 import { FormEvent, useEffect, useMemo, useState } from 'react';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import {
   DigestThread,
   Persona,
@@ -30,6 +30,7 @@ import {
 } from '../lib/api';
 
 const TOKEN_KEY = 'personaworlds_token';
+const REMIX_PAYLOAD_KEY = 'personaworlds_remix_payload';
 
 function Badge({ authoredBy }: { authoredBy: Post['authored_by'] | ThreadResponse['replies'][number]['authored_by'] }) {
   const className =
@@ -47,6 +48,7 @@ function parseLines(value: string) {
 
 export default function HomePage() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const [token, setToken] = useState<string>('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -88,6 +90,7 @@ export default function HomePage() {
   const [battleTopic, setBattleTopic] = useState('');
   const [battlePersonaAId, setBattlePersonaAId] = useState('');
   const [battlePersonaBId, setBattlePersonaBId] = useState('');
+  const [remixApplied, setRemixApplied] = useState(false);
 
   const selectedRoom = useMemo(() => rooms.find((r) => r.id === selectedRoomId), [rooms, selectedRoomId]);
   const selectedPersona = useMemo(() => personas.find((p) => p.id === selectedPersonaId), [personas, selectedPersonaId]);
@@ -112,6 +115,62 @@ export default function HomePage() {
 
     void refreshCoreData(token);
   }, [token]);
+
+  useEffect(() => {
+    setRemixApplied(false);
+  }, [token]);
+
+  useEffect(() => {
+    if (!token || remixApplied) {
+      return;
+    }
+
+    let remixRoomID = (searchParams.get('remix_room_id') || '').trim();
+    let remixTopic = (searchParams.get('remix_topic') || '').trim();
+    let openModal = (searchParams.get('open_battle_modal') || '').trim() === '1';
+
+    if ((!remixRoomID || !remixTopic) && typeof window !== 'undefined') {
+      const storedRaw = localStorage.getItem(REMIX_PAYLOAD_KEY);
+      if (storedRaw) {
+        try {
+          const storedPayload = JSON.parse(storedRaw) as { room_id?: string; topic?: string };
+          remixRoomID = remixRoomID || (storedPayload.room_id || '').trim();
+          remixTopic = remixTopic || (storedPayload.topic || '').trim();
+          openModal = true;
+        } catch {
+          // ignore malformed stored payload
+        }
+      }
+    }
+
+    if (typeof window !== 'undefined') {
+      localStorage.removeItem(REMIX_PAYLOAD_KEY);
+    }
+
+    if (remixRoomID) {
+      setSelectedRoomId(remixRoomID);
+    }
+    if (remixTopic) {
+      setBattleTopic(remixTopic);
+      openModal = true;
+    }
+
+    if (openModal) {
+      setError('');
+      setMessage('');
+      setBattleModalOpen(true);
+    }
+
+    const hasRemixQuery =
+      (searchParams.get('open_battle_modal') || '').trim() !== '' ||
+      (searchParams.get('remix_room_id') || '').trim() !== '' ||
+      (searchParams.get('remix_topic') || '').trim() !== '';
+    if (hasRemixQuery) {
+      router.replace('/');
+    }
+
+    setRemixApplied(true);
+  }, [token, remixApplied, searchParams, router]);
 
   useEffect(() => {
     if (!token || !selectedRoomId) {
@@ -509,10 +568,6 @@ export default function HomePage() {
       setError('select a room first');
       return;
     }
-    if (personas.length < 2) {
-      setError('create at least two personas to start a battle');
-      return;
-    }
     setError('');
     setMessage('');
     setBattleModalOpen(true);
@@ -791,7 +846,7 @@ export default function HomePage() {
         <section className="panel stack">
           <div className="section-head">
             <h2>Rooms</h2>
-            <button className="secondary" onClick={onOpenBattleModal} disabled={loading || personas.length < 2}>
+            <button className="secondary" onClick={onOpenBattleModal} disabled={loading}>
               Start Battle
             </button>
           </div>
@@ -935,8 +990,12 @@ export default function HomePage() {
                 </select>
               </label>
 
+              {personas.length < 2 && (
+                <p className="subtle">Create at least two personas from the left panel, then start the remix battle.</p>
+              )}
+
               <div className="row">
-                <button type="submit" disabled={loading}>
+                <button type="submit" disabled={loading || personas.length < 2}>
                   Start Battle
                 </button>
                 <button className="secondary" type="button" onClick={onCloseBattleModal} disabled={loading}>

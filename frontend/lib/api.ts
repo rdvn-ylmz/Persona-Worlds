@@ -106,6 +106,12 @@ export type BattleTurn = {
   persona_id: string;
   persona_name: string;
   content: string;
+  metadata: {
+    quality_score: number;
+    quality_label: 'HIGH' | 'MED' | 'LOW' | string;
+    quality_reasons?: string[];
+    regenerated?: boolean;
+  };
   created_at: string;
 };
 
@@ -131,6 +137,23 @@ export type Battle = {
 
 export type BattleResponse = {
   battle: Battle;
+};
+
+export type PublicBattleSummary = {
+  topic: string;
+  verdict_text: string;
+  top_takeaways: string[];
+  room_name: string;
+};
+
+export type BattleRemixPayload = {
+  room_id: string;
+  topic: string;
+};
+
+export type BattleRemixResponse = {
+  remix_payload: BattleRemixPayload;
+  requires_signup: boolean;
 };
 
 export type CreateBattleResponse = {
@@ -355,8 +378,57 @@ export async function getBattle(token: string, battleId: string) {
   return request<BattleResponse>(`/battles/${battleId}`, { token });
 }
 
+export async function regenerateBattle(token: string, battleId: string) {
+  return request<{ battle_id: string; status: BattleStatus; requeued: boolean }>(`/battles/${battleId}/regenerate`, {
+    method: 'POST',
+    token,
+    body: {}
+  });
+}
+
 export async function getPublicBattle(battleId: string) {
   return request<BattleResponse>(`/b/${battleId}`);
+}
+
+export async function getPublicBattleSummary(battleId: string) {
+  return request<PublicBattleSummary>(`/b/${battleId}/summary`);
+}
+
+export async function remixBattle(battleId: string, token?: string): Promise<BattleRemixResponse> {
+  const response = await fetch(`${API_BASE}/battles/${encodeURIComponent(battleId)}/remix`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {})
+    },
+    body: JSON.stringify({})
+  });
+
+  const data = await response.json().catch(() => ({} as Record<string, unknown>));
+  if (response.status === 401) {
+    const remixPayload = data?.remix_payload as BattleRemixPayload | undefined;
+    if (!remixPayload || !remixPayload.room_id || !remixPayload.topic) {
+      throw new Error((data?.error as string) || 'signup required');
+    }
+    return {
+      remix_payload: remixPayload,
+      requires_signup: true
+    };
+  }
+
+  if (!response.ok) {
+    throw new Error((data?.error as string) || `request failed with status ${response.status}`);
+  }
+
+  const remixPayload = data?.remix_payload as BattleRemixPayload | undefined;
+  if (!remixPayload || !remixPayload.room_id || !remixPayload.topic) {
+    throw new Error('invalid remix payload');
+  }
+
+  return {
+    remix_payload: remixPayload,
+    requires_signup: false
+  };
 }
 
 export async function createDraft(token: string, roomId: string, personaId: string) {

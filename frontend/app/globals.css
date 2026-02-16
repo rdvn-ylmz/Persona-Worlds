@@ -289,6 +289,28 @@ label {
   color: var(--muted);
 }
 
+.quality-badge {
+  font-weight: 600;
+}
+
+.quality-high {
+  color: #065f46;
+  border-color: #6ee7b7;
+  background: #ecfdf5;
+}
+
+.quality-med {
+  color: #92400e;
+  border-color: #fcd34d;
+  background: #fffbeb;
+}
+
+.quality-low {
+  color: #991b1b;
+  border-color: #fca5a5;
+  background: #fef2f2;
+}
+
 .badge {
   border-radius: 999px;
   padding: 2px 8px;
@@ -421,6 +443,22 @@ label {
   background: #fff;
 }
 
+.public-battle-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  gap: 16px;
+  align-items: start;
+}
+
+.public-battle-main {
+  min-width: 0;
+}
+
+.cta-sticky-card {
+  position: sticky;
+  top: 18px;
+}
+
 .battle-turn-meta {
   display: flex;
   gap: 8px;
@@ -469,5 +507,13 @@ label {
 
   .battle-header-actions {
     width: 100%;
+  }
+
+  .public-battle-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .cta-sticky-card {
+    position: static;
   }
 }

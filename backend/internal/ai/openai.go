@@ -106,9 +106,14 @@ func (c *OpenAIClient) GenerateBattleTurn(ctx context.Context, input BattleTurnI
 		historyLines = append(historyLines, "No previous turns")
 	}
 
+	strictGuidance := ""
+	if input.Strict {
+		strictGuidance = "Strict quality mode: avoid generic wording, include one concrete number or named example in evidence, and do not repeat prior claim framing."
+	}
+
 	system := "You write one concise debate turn in strict JSON."
 	user := fmt.Sprintf(
-		"Topic: %s\nTurn index: %d\nPersona name: %s\nPersona bio: %s\nPersona tone: %s\nOpponent: %s\nSide: %s\nPrior turns: %s\nOutput JSON rules: return exactly one object with keys claim and evidence. claim must be one sentence. evidence must be one sentence with concrete support. No markdown or extra keys.",
+		"Topic: %s\nTurn index: %d\nPersona name: %s\nPersona bio: %s\nPersona tone: %s\nOpponent: %s\nSide: %s\nPrior turns: %s\n%s\nOutput JSON rules: return exactly one object with keys claim and evidence. claim must be one sentence. evidence must be one sentence with concrete support. No markdown or extra keys.",
 		input.Topic,
 		input.TurnIndex,
 		input.Persona.Name,
@@ -117,6 +122,7 @@ func (c *OpenAIClient) GenerateBattleTurn(ctx context.Context, input BattleTurnI
 		input.Opponent.Name,
 		strings.ToUpper(strings.TrimSpace(input.Side)),
 		strings.Join(historyLines, "\n- "),
+		strings.TrimSpace(strictGuidance),
 	)
 
 	raw, err := c.chat(ctx, system, user)

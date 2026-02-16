@@ -172,28 +172,48 @@ type BattleVerdict struct {
 	Takeaways []string `json:"takeaways"`
 }
 
+type BattleTurnMetadata struct {
+	QualityScore int      `json:"quality_score"`
+	QualityLabel string   `json:"quality_label"`
+	Reasons      []string `json:"quality_reasons,omitempty"`
+	Regenerated  bool     `json:"regenerated"`
+}
+
 type BattleTurn struct {
-	BattleID   string    `json:"battle_id"`
-	TurnIndex  int       `json:"turn_index"`
-	PersonaID  string    `json:"persona_id"`
-	Persona    string    `json:"persona_name"`
-	Content    string    `json:"content"`
-	CreatedAt  time.Time `json:"created_at"`
+	BattleID  string             `json:"battle_id"`
+	TurnIndex int                `json:"turn_index"`
+	PersonaID string             `json:"persona_id"`
+	Persona   string             `json:"persona_name"`
+	Content   string             `json:"content"`
+	Metadata  BattleTurnMetadata `json:"metadata"`
+	CreatedAt time.Time          `json:"created_at"`
 }
 
 type Battle struct {
-	ID        string       `json:"id"`
-	RoomID    string       `json:"room_id"`
-	RoomName  string       `json:"room_name"`
-	Topic     string       `json:"topic"`
-	Status    string       `json:"status"`
+	ID        string        `json:"id"`
+	RoomID    string        `json:"room_id"`
+	RoomName  string        `json:"room_name"`
+	Topic     string        `json:"topic"`
+	Status    string        `json:"status"`
 	PersonaA  BattlePersona `json:"persona_a"`
 	PersonaB  BattlePersona `json:"persona_b"`
-	Turns     []BattleTurn `json:"turns"`
+	Turns     []BattleTurn  `json:"turns"`
 	Verdict   BattleVerdict `json:"verdict"`
-	Error     string       `json:"error,omitempty"`
-	CreatedAt time.Time    `json:"created_at"`
-	UpdatedAt time.Time    `json:"updated_at"`
+	Error     string        `json:"error,omitempty"`
+	CreatedAt time.Time     `json:"created_at"`
+	UpdatedAt time.Time     `json:"updated_at"`
+}
+
+type PublicBattleSummary struct {
+	Topic        string   `json:"topic"`
+	VerdictText  string   `json:"verdict_text"`
+	TopTakeaways []string `json:"top_takeaways"`
+	RoomName     string   `json:"room_name"`
+}
+
+type BattleRemixPayload struct {
+	RoomID string `json:"room_id"`
+	Topic  string `json:"topic"`
 }
 
 const dailyBattleCreateLimit = 10
@@ -308,7 +328,9 @@ func (s *Server) Router() http.Handler {
 		r.With(s.publicWriteRateLimitMiddleware).Post("/follow", s.handleFollowPublicProfile)
 	})
 
+	r.With(s.publicReadRateLimitMiddleware).Get("/b/{id}/summary", s.handleGetPublicBattleSummary)
 	r.With(s.publicReadRateLimitMiddleware).Get("/b/{id}", s.handleGetPublicBattle)
+	r.Post("/battles/{id}/remix", s.handleBattleRemix)
 
 	r.Group(func(r chi.Router) {
 		r.Use(auth.Middleware(s.cfg.JWTSecret))
@@ -329,6 +351,7 @@ func (s *Server) Router() http.Handler {
 		r.Post("/rooms/{id}/battles", s.handleCreateBattle)
 		r.Post("/rooms/{id}/posts/draft", s.handleCreateDraft)
 		r.Get("/battles/{id}", s.handleGetBattle)
+		r.Post("/battles/{id}/regenerate", s.handleRegenerateBattle)
 		r.Post("/posts/{id}/approve", s.handleApprovePost)
 		r.Post("/posts/{id}/generate-replies", s.handleGenerateReplies)
 		r.Get("/posts/{id}/thread", s.handleGetThread)
@@ -1234,13 +1257,13 @@ func (s *Server) handleCreateBattle(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusCreated, map[string]any{
-		"battle_id":  battleID,
-		"status":     "PENDING",
-		"share_url":  fmt.Sprintf("%s/b/%s", strings.TrimRight(s.cfg.FrontendOrigin, "/"), battleID),
-		"room_id":    room.ID,
-		"room_name":  room.Name,
-		"topic":      req.Topic,
-		"queued":     true,
+		"battle_id":   battleID,
+		"status":      "PENDING",
+		"share_url":   fmt.Sprintf("%s/b/%s", strings.TrimRight(s.cfg.FrontendOrigin, "/"), battleID),
+		"room_id":     room.ID,
+		"room_name":   room.Name,
+		"topic":       req.Topic,
+		"queued":      true,
 		"daily_limit": dailyBattleCreateLimit,
 	})
 }
@@ -1270,6 +1293,94 @@ func (s *Server) handleGetBattle(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"battle": battle})
 }
 
+func (s *Server) handleRegenerateBattle(w http.ResponseWriter, r *http.Request) {
+	userID, ok := auth.UserIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "missing user")
+		return
+	}
+	battleID := strings.TrimSpace(chi.URLParam(r, "id"))
+	if battleID == "" {
+		writeError(w, http.StatusNotFound, "battle not found")
+		return
+	}
+
+	_, err := s.getBattleByID(r.Context(), battleID, userID, true)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "battle not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "could not load battle")
+		return
+	}
+
+	tx, err := s.db.Begin(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not start transaction")
+		return
+	}
+	defer tx.Rollback(r.Context())
+
+	if _, err := tx.Exec(r.Context(), `
+		UPDATE battles
+		SET status='PENDING', verdict='{}'::jsonb, error='', updated_at=NOW()
+		WHERE id = $1
+	`, battleID); err != nil {
+		writeError(w, http.StatusInternalServerError, "could not requeue battle")
+		return
+	}
+
+	if _, err := tx.Exec(r.Context(), `
+		DELETE FROM battle_turns
+		WHERE battle_id = $1
+	`, battleID); err != nil {
+		writeError(w, http.StatusInternalServerError, "could not clear battle turns")
+		return
+	}
+
+	if err := tx.Commit(r.Context()); err != nil {
+		writeError(w, http.StatusInternalServerError, "could not commit battle regeneration")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"battle_id": battleID,
+		"status":    "PENDING",
+		"requeued":  true,
+	})
+}
+
+func (s *Server) handleBattleRemix(w http.ResponseWriter, r *http.Request) {
+	battleID := strings.TrimSpace(chi.URLParam(r, "id"))
+	if battleID == "" {
+		writeError(w, http.StatusNotFound, "battle not found")
+		return
+	}
+
+	payload, err := s.getBattleRemixPayload(r.Context(), battleID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "battle not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "could not load remix payload")
+		return
+	}
+
+	if _, ok := s.optionalUserIDFromRequest(r); !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{
+			"error":         "signup_required",
+			"remix_payload": payload,
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"remix_payload": payload,
+	})
+}
+
 func (s *Server) handleGetPublicBattle(w http.ResponseWriter, r *http.Request) {
 	battleID := strings.TrimSpace(chi.URLParam(r, "id"))
 	if battleID == "" {
@@ -1289,6 +1400,26 @@ func (s *Server) handleGetPublicBattle(w http.ResponseWriter, r *http.Request) {
 
 	battle.Error = ""
 	writeJSON(w, http.StatusOK, map[string]any{"battle": battle})
+}
+
+func (s *Server) handleGetPublicBattleSummary(w http.ResponseWriter, r *http.Request) {
+	battleID := strings.TrimSpace(chi.URLParam(r, "id"))
+	if battleID == "" {
+		writeError(w, http.StatusNotFound, "battle not found")
+		return
+	}
+
+	summary, err := s.getPublicBattleSummary(r.Context(), battleID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "battle not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "could not load battle summary")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, summary)
 }
 
 func (s *Server) handleCreateDraft(w http.ResponseWriter, r *http.Request) {
@@ -1738,6 +1869,7 @@ func (s *Server) listBattleTurns(ctx context.Context, battleID string) ([]Battle
 			bt.persona_id::text,
 			COALESCE(p.name, ''),
 			bt.content,
+			bt.metadata,
 			bt.created_at
 		FROM battle_turns bt
 		LEFT JOIN personas p ON p.id = bt.persona_id
@@ -1752,8 +1884,26 @@ func (s *Server) listBattleTurns(ctx context.Context, battleID string) ([]Battle
 	turns := make([]BattleTurn, 0)
 	for rows.Next() {
 		var turn BattleTurn
-		if err := rows.Scan(&turn.BattleID, &turn.TurnIndex, &turn.PersonaID, &turn.Persona, &turn.Content, &turn.CreatedAt); err != nil {
+		var metadataRaw []byte
+		if err := rows.Scan(&turn.BattleID, &turn.TurnIndex, &turn.PersonaID, &turn.Persona, &turn.Content, &metadataRaw, &turn.CreatedAt); err != nil {
 			return nil, err
+		}
+
+		turn.Metadata = BattleTurnMetadata{
+			QualityLabel: "LOW",
+			Reasons:      []string{},
+		}
+		if len(metadataRaw) > 0 {
+			if err := json.Unmarshal(metadataRaw, &turn.Metadata); err != nil {
+				return nil, err
+			}
+		}
+		turn.Metadata.QualityLabel = strings.ToUpper(strings.TrimSpace(turn.Metadata.QualityLabel))
+		if turn.Metadata.QualityLabel == "" {
+			turn.Metadata.QualityLabel = "LOW"
+		}
+		if turn.Metadata.Reasons == nil {
+			turn.Metadata.Reasons = []string{}
 		}
 		turns = append(turns, turn)
 	}
@@ -1787,6 +1937,71 @@ func hydrateBattleVerdict(battle *Battle, verdictRaw []byte) error {
 	}
 	battle.Verdict.Takeaways = cleanTakeaways
 	return nil
+}
+
+func (s *Server) getPublicBattleSummary(ctx context.Context, battleID string) (PublicBattleSummary, error) {
+	var (
+		summary    PublicBattleSummary
+		verdictRaw []byte
+	)
+	err := s.db.QueryRow(ctx, `
+		SELECT
+			b.topic,
+			COALESCE(r.name, ''),
+			b.verdict
+		FROM battles b
+		JOIN rooms r ON r.id = b.room_id
+		WHERE b.id = $1
+	`, battleID).Scan(&summary.Topic, &summary.RoomName, &verdictRaw)
+	if err != nil {
+		return PublicBattleSummary{}, err
+	}
+
+	summary.Topic = strings.TrimSpace(summary.Topic)
+	summary.RoomName = strings.TrimSpace(summary.RoomName)
+	summary.TopTakeaways = []string{}
+	summary.VerdictText = ""
+
+	if len(verdictRaw) > 0 {
+		var verdict BattleVerdict
+		if err := json.Unmarshal(verdictRaw, &verdict); err != nil {
+			return PublicBattleSummary{}, err
+		}
+		summary.VerdictText = strings.TrimSpace(verdict.Verdict)
+		for _, takeaway := range verdict.Takeaways {
+			trimmed := strings.TrimSpace(takeaway)
+			if trimmed == "" {
+				continue
+			}
+			summary.TopTakeaways = append(summary.TopTakeaways, trimmed)
+			if len(summary.TopTakeaways) >= 3 {
+				break
+			}
+		}
+	}
+
+	if summary.VerdictText == "" {
+		summary.VerdictText = "A structured persona debate is in progress."
+	}
+	if summary.TopTakeaways == nil {
+		summary.TopTakeaways = []string{}
+	}
+	return summary, nil
+}
+
+func (s *Server) getBattleRemixPayload(ctx context.Context, battleID string) (BattleRemixPayload, error) {
+	var payload BattleRemixPayload
+	err := s.db.QueryRow(ctx, `
+		SELECT room_id::text, topic
+		FROM battles
+		WHERE id = $1
+	`, battleID).Scan(&payload.RoomID, &payload.Topic)
+	if err != nil {
+		return BattleRemixPayload{}, err
+	}
+	payload.RoomID = strings.TrimSpace(payload.RoomID)
+	payload.Topic = strings.TrimSpace(payload.Topic)
+	return payload, nil
 }
 
 func (s *Server) getPersonaByID(ctx context.Context, userID, personaID string) (Persona, error) {

@@ -1,161 +1,76 @@
-'use client';
+import type { Metadata } from 'next';
+import PublicBattleClient from './PublicBattleClient';
+import { PublicBattleSummary, getPublicBattleSummary } from '../../../lib/api';
 
-import Link from 'next/link';
-import { useParams } from 'next/navigation';
-import { useEffect, useMemo, useState } from 'react';
-import { Battle, getPublicBattle } from '../../../lib/api';
+type PageParams = {
+  id: string;
+};
 
-export default function PublicBattlePage() {
-  const params = useParams<{ id: string }>();
-  const battleID = useMemo(() => (params?.id || '').toString().trim(), [params]);
+type PageProps = {
+  params: PageParams;
+};
 
-  const [battle, setBattle] = useState<Battle | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
-  const [error, setError] = useState('');
+export const dynamic = 'force-dynamic';
 
-  useEffect(() => {
-    if (!battleID) {
-      setLoading(false);
-      return;
-    }
-    void loadBattle(battleID, true);
-  }, [battleID]);
+const FALLBACK_TITLE = 'Persona Battle';
+const FALLBACK_DESCRIPTION = 'A structured AI persona debate you can share publicly.';
 
-  useEffect(() => {
-    if (!battleID || !battle) {
-      return;
-    }
-    if (battle.status !== 'PENDING' && battle.status !== 'PROCESSING') {
-      return;
-    }
-
-    const timer = window.setTimeout(() => {
-      void loadBattle(battleID, false);
-    }, 3000);
-
-    return () => window.clearTimeout(timer);
-  }, [battle, battleID]);
-
-  async function loadBattle(id: string, initial: boolean) {
-    try {
-      if (initial) {
-        setLoading(true);
-      } else {
-        setRefreshing(true);
-      }
-      setError('');
-      const response = await getPublicBattle(id);
-      setBattle(response.battle);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'could not load battle');
-    } finally {
-      if (initial) {
-        setLoading(false);
-      } else {
-        setRefreshing(false);
-      }
-    }
+function buildDescription(summary: PublicBattleSummary | null) {
+  if (!summary) {
+    return FALLBACK_DESCRIPTION;
   }
-
-  if (loading) {
-    return (
-      <main className="container">
-        <section className="panel battle-panel stack">
-          <h1>Persona Battle</h1>
-          <p className="subtle">Loading shared battle...</p>
-        </section>
-      </main>
-    );
+  const verdict = summary.verdict_text?.trim() || '';
+  const takeaway = summary.top_takeaways?.[0]?.trim() || '';
+  const parts = [verdict, takeaway ? `Takeaway: ${takeaway}` : ''].filter((value) => value.length > 0);
+  if (parts.length === 0) {
+    return FALLBACK_DESCRIPTION;
   }
+  return parts.join(' ').slice(0, 260);
+}
 
-  if (!battle) {
-    return (
-      <main className="container">
-        <section className="panel battle-panel stack">
-          <h1>Persona Battle</h1>
-          <p className="error">{error || 'battle not found'}</p>
-          <Link className="primary-link" href="/">
-            Create your own persona
-          </Link>
-        </section>
-      </main>
-    );
-  }
-
+function siteOrigin() {
   return (
-    <main className="container">
-      <section className="panel battle-panel stack">
-        <div className="battle-header">
-          <div className="stack">
-            <h1>{battle.topic}</h1>
-            <div className="battle-turn-meta">
-              <span className="status">Room: {battle.room_name || battle.room_id}</span>
-              <span className="status">Status: {battle.status}</span>
-              <span className="subtle">{new Date(battle.created_at).toLocaleString()}</span>
-            </div>
-          </div>
-          <div className="battle-header-actions">
-            <button
-              className="secondary"
-              onClick={() => {
-                if (battleID) {
-                  void loadBattle(battleID, false);
-                }
-              }}
-              disabled={refreshing}
-            >
-              {refreshing ? 'Refreshing...' : 'Refresh'}
-            </button>
-            <Link className="primary-link" href="/">
-              Create Your Persona
-            </Link>
-          </div>
-        </div>
+    process.env.NEXT_PUBLIC_FRONTEND_ORIGIN ||
+    process.env.NEXT_PUBLIC_SITE_URL ||
+    'http://localhost:3000'
+  ).replace(/\/$/, '');
+}
 
-        <div className="mini-card">
-          <strong>{battle.persona_a.name} (FOR)</strong>
-          <span>{battle.persona_a.bio || 'No bio.'}</span>
-          <strong>{battle.persona_b.name} (AGAINST)</strong>
-          <span>{battle.persona_b.bio || 'No bio.'}</span>
-        </div>
+async function loadSummary(id: string): Promise<PublicBattleSummary | null> {
+  try {
+    const summary = await getPublicBattleSummary(id);
+    return summary;
+  } catch {
+    return null;
+  }
+}
 
-        {battle.status === 'FAILED' && <p className="error">Battle generation failed.</p>}
-        {battle.turns.length === 0 && battle.status !== 'FAILED' && (
-          <p className="subtle">Battle turns are being generated...</p>
-        )}
+export async function generateMetadata({ params }: PageProps): Promise<Metadata> {
+  const battleID = (params?.id || '').trim();
+  const summary = battleID ? await loadSummary(battleID) : null;
 
-        {battle.turns.length > 0 && (
-          <div className="stack">
-            <h2>Turns</h2>
-            {battle.turns.map((turn) => (
-              <article key={`${turn.battle_id}-${turn.turn_index}`} className="battle-turn">
-                <div className="battle-turn-meta">
-                  <span className="status">Turn {turn.turn_index}</span>
-                  <span>{turn.persona_name || 'Persona'}</span>
-                </div>
-                <p>{turn.content}</p>
-              </article>
-            ))}
-          </div>
-        )}
+  const title = summary?.topic?.trim() || FALLBACK_TITLE;
+  const description = buildDescription(summary);
+  const url = `${siteOrigin()}/b/${encodeURIComponent(battleID)}`;
 
-        {(battle.verdict.verdict || battle.verdict.takeaways.length > 0) && (
-          <div className="stack">
-            <h2>AI Verdict</h2>
-            {battle.verdict.verdict && <p>{battle.verdict.verdict}</p>}
-            {battle.verdict.takeaways.length > 0 && (
-              <ul className="takeaway-list">
-                {battle.verdict.takeaways.map((takeaway, index) => (
-                  <li key={`${takeaway}-${index}`}>{takeaway}</li>
-                ))}
-              </ul>
-            )}
-          </div>
-        )}
+  return {
+    title,
+    description,
+    openGraph: {
+      title,
+      description,
+      type: 'article',
+      url
+    },
+    twitter: {
+      card: 'summary_large_image',
+      title,
+      description
+    }
+  };
+}
 
-        {error && <p className="error">{error}</p>}
-      </section>
-    </main>
-  );
+export default function PublicBattlePage({ params }: PageProps) {
+  const battleID = (params?.id || '').trim();
+  return <PublicBattleClient battleID={battleID} />;
 }

@@ -128,6 +128,13 @@ func (m *MockClient) GenerateBattleTurn(_ context.Context, input BattleTurnInput
 		input.Persona.Name,
 		input.Persona.Bio,
 	)
+	if input.Strict {
+		evidence = fmt.Sprintf(
+			"%s references a concrete case with 2 measured outcomes and a before/after example from %s.",
+			input.Persona.Name,
+			input.Persona.Bio,
+		)
+	}
 
 	return BattleTurnOutput{
 		Claim:    claim,

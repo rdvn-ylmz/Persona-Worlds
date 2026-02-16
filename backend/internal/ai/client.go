@@ -46,6 +46,7 @@ type BattleTurnInput struct {
 	Side      string
 	TurnIndex int
 	History   []BattleTurnContext
+	Strict    bool
 }
 
 type BattleTurnOutput struct {

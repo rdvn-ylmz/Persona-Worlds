@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"regexp"
 	"strings"
 	"time"
 
@@ -44,13 +45,20 @@ type digestStats struct {
 }
 
 type generatedBattleTurn struct {
-	TurnIndex   int
-	PersonaID   string
-	PersonaName string
-	Side        string
-	Claim       string
-	Evidence    string
-	Content     string
+	TurnIndex    int
+	PersonaID    string
+	PersonaName  string
+	Side         string
+	Claim        string
+	Evidence     string
+	Content      string
+	Metadata     map[string]any
+	QualityScore int
+}
+
+type turnQualityResult struct {
+	Score   int
+	Reasons []string
 }
 
 type storedBattleVerdict struct {
@@ -66,6 +74,12 @@ const (
 	battleTurnCount     = 6
 	battleTurnWordLimit = 120
 	battleVerdictWords  = 80
+	battleMinQuality    = 60
+)
+
+var (
+	specificEvidencePattern = regexp.MustCompile(`(?i)\b(for example|for instance|e\.g\.|case study|experiment|cohort|sample|pilot|baseline|before|after)\b`)
+	numberPattern           = regexp.MustCompile(`\d`)
 )
 
 func (e permanentError) Error() string {
@@ -324,46 +338,18 @@ func (w *Worker) executeGenerateBattle(ctx context.Context, battleID string) err
 			side = "AGAINST"
 		}
 
-		generated, err := w.llm.GenerateBattleTurn(ctx, ai.BattleTurnInput{
-			Topic:     topic,
-			Persona:   active,
-			Opponent:  opponent,
-			Side:      side,
-			TurnIndex: turnIndex,
-			History:   history,
-		})
+		turn, err := w.generateScoredBattleTurn(ctx, topic, turnIndex, active, opponent, side, history)
 		if err != nil {
 			return err
-		}
-
-		claim := strings.TrimSpace(generated.Claim)
-		evidence := strings.TrimSpace(generated.Evidence)
-		if claim == "" || evidence == "" {
-			return permanentError{message: "battle turn generation returned empty claim or evidence"}
-		}
-
-		content := formatBattleTurnContent(claim, evidence, battleTurnWordLimit)
-		if err := safety.ValidateContent(content, 1200); err != nil {
-			return permanentError{message: err.Error()}
-		}
-
-		turn := generatedBattleTurn{
-			TurnIndex:   turnIndex,
-			PersonaID:   active.ID,
-			PersonaName: active.Name,
-			Side:        side,
-			Claim:       claim,
-			Evidence:    evidence,
-			Content:     content,
 		}
 		turns = append(turns, turn)
 
 		history = append(history, ai.BattleTurnContext{
 			TurnIndex:   turnIndex,
-			PersonaName: active.Name,
-			Side:        side,
-			Claim:       claim,
-			Evidence:    evidence,
+			PersonaName: turn.PersonaName,
+			Side:        turn.Side,
+			Claim:       turn.Claim,
+			Evidence:    turn.Evidence,
 		})
 	}
 
@@ -414,10 +400,14 @@ func (w *Worker) executeGenerateBattle(ctx context.Context, battleID string) err
 	}
 
 	for _, turn := range turns {
+		metadataRaw, err := json.Marshal(turn.Metadata)
+		if err != nil {
+			return err
+		}
 		if _, err := tx.Exec(ctx, `
-			INSERT INTO battle_turns(battle_id, turn_index, persona_id, content)
-			VALUES ($1, $2, $3, $4)
-		`, battleID, turn.TurnIndex, turn.PersonaID, turn.Content); err != nil {
+			INSERT INTO battle_turns(battle_id, turn_index, persona_id, content, metadata)
+			VALUES ($1, $2, $3, $4, $5::jsonb)
+		`, battleID, turn.TurnIndex, turn.PersonaID, turn.Content, metadataRaw); err != nil {
 			return err
 		}
 	}
@@ -833,6 +823,80 @@ func truncatePreview(value string, maxRunes int) string {
 	return strings.TrimSpace(string(runes[:maxRunes]))
 }
 
+func (w *Worker) generateScoredBattleTurn(
+	ctx context.Context,
+	topic string,
+	turnIndex int,
+	active ai.PersonaContext,
+	opponent ai.PersonaContext,
+	side string,
+	history []ai.BattleTurnContext,
+) (generatedBattleTurn, error) {
+	buildAttempt := func(strict bool) (generatedBattleTurn, error) {
+		generated, err := w.llm.GenerateBattleTurn(ctx, ai.BattleTurnInput{
+			Topic:     topic,
+			Persona:   active,
+			Opponent:  opponent,
+			Side:      side,
+			TurnIndex: turnIndex,
+			History:   history,
+			Strict:    strict,
+		})
+		if err != nil {
+			return generatedBattleTurn{}, err
+		}
+
+		claim := strings.TrimSpace(generated.Claim)
+		evidence := strings.TrimSpace(generated.Evidence)
+		if claim == "" || evidence == "" {
+			return generatedBattleTurn{}, permanentError{message: "battle turn generation returned empty claim or evidence"}
+		}
+
+		content := formatBattleTurnContent(claim, evidence, battleTurnWordLimit)
+		if err := safety.ValidateContent(content, 1200); err != nil {
+			return generatedBattleTurn{}, permanentError{message: err.Error()}
+		}
+
+		quality := evaluateBattleTurnQuality(content, claim, evidence, history, battleTurnWordLimit)
+		return generatedBattleTurn{
+			TurnIndex:    turnIndex,
+			PersonaID:    active.ID,
+			PersonaName:  active.Name,
+			Side:         side,
+			Claim:        claim,
+			Evidence:     evidence,
+			Content:      content,
+			QualityScore: quality.Score,
+			Metadata: map[string]any{
+				"quality_score":   quality.Score,
+				"quality_label":   qualityLabel(quality.Score),
+				"quality_reasons": quality.Reasons,
+				"strict_prompt":   strict,
+			},
+		}, nil
+	}
+
+	initialTurn, err := buildAttempt(false)
+	if err != nil {
+		return generatedBattleTurn{}, err
+	}
+	if initialTurn.QualityScore >= battleMinQuality {
+		return initialTurn, nil
+	}
+
+	retryTurn, err := buildAttempt(true)
+	if err != nil {
+		return initialTurn, nil
+	}
+
+	initialTurn.Metadata["regenerated"] = true
+	retryTurn.Metadata["regenerated"] = true
+	if retryTurn.QualityScore >= initialTurn.QualityScore {
+		return retryTurn, nil
+	}
+	return initialTurn, nil
+}
+
 func formatBattleTurnContent(claim, evidence string, maxWords int) string {
 	normalizedClaim := strings.TrimSpace(claim)
 	normalizedEvidence := strings.TrimSpace(evidence)
@@ -869,6 +933,159 @@ func truncateWords(value string, maxWords int) string {
 		return strings.Join(words, " ")
 	}
 	return strings.Join(words[:maxWords], " ")
+}
+
+func evaluateBattleTurnQuality(content, claim, evidence string, history []ai.BattleTurnContext, maxWords int) turnQualityResult {
+	score := 100
+	reasons := make([]string, 0)
+
+	lowerContent := strings.ToLower(strings.TrimSpace(content))
+	hasClaim := strings.Contains(lowerContent, "claim:")
+	hasEvidence := strings.Contains(lowerContent, "evidence:")
+	if !hasClaim || !hasEvidence {
+		score -= 35
+		reasons = append(reasons, "Missing explicit Claim/Evidence format")
+	}
+	if strings.TrimSpace(claim) == "" || strings.TrimSpace(evidence) == "" {
+		score -= 25
+		reasons = append(reasons, "Claim or evidence is empty")
+	}
+
+	wordCount := len(strings.Fields(strings.TrimSpace(content)))
+	if wordCount > maxWords {
+		score -= 20
+		reasons = append(reasons, "Exceeds word limit")
+	}
+
+	if !hasSpecificEvidence(evidence) {
+		score -= 20
+		reasons = append(reasons, "Evidence lacks specificity")
+	}
+
+	if isRepetitiveTurn(claim, evidence, history) {
+		score -= 20
+		reasons = append(reasons, "Repeats prior turn arguments")
+	}
+
+	if score < 0 {
+		score = 0
+	}
+	if score > 100 {
+		score = 100
+	}
+	if len(reasons) == 0 {
+		reasons = append(reasons, "Clear claim and specific evidence")
+	}
+
+	return turnQualityResult{
+		Score:   score,
+		Reasons: reasons,
+	}
+}
+
+func hasSpecificEvidence(evidence string) bool {
+	trimmed := strings.TrimSpace(evidence)
+	if trimmed == "" {
+		return false
+	}
+	if numberPattern.MatchString(trimmed) {
+		return true
+	}
+	return specificEvidencePattern.MatchString(trimmed)
+}
+
+func isRepetitiveTurn(claim, evidence string, history []ai.BattleTurnContext) bool {
+	claimNorm := normalizeText(claim)
+	evidenceNorm := normalizeText(evidence)
+	if claimNorm == "" && evidenceNorm == "" {
+		return false
+	}
+
+	for _, previous := range history {
+		prevClaim := normalizeText(previous.Claim)
+		prevEvidence := normalizeText(previous.Evidence)
+
+		if claimNorm != "" && claimNorm == prevClaim {
+			return true
+		}
+		if evidenceNorm != "" && evidenceNorm == prevEvidence {
+			return true
+		}
+		if jaccardSimilarity(claimNorm, prevClaim) >= 0.78 {
+			return true
+		}
+		if jaccardSimilarity(evidenceNorm, prevEvidence) >= 0.78 {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeText(value string) string {
+	lower := strings.ToLower(strings.TrimSpace(value))
+	if lower == "" {
+		return ""
+	}
+	var b strings.Builder
+	lastSpace := false
+	for _, r := range lower {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+			lastSpace = false
+			continue
+		}
+		if !lastSpace {
+			b.WriteRune(' ')
+			lastSpace = true
+		}
+	}
+	return strings.Join(strings.Fields(b.String()), " ")
+}
+
+func jaccardSimilarity(a, b string) float64 {
+	if strings.TrimSpace(a) == "" || strings.TrimSpace(b) == "" {
+		return 0
+	}
+
+	setA := map[string]struct{}{}
+	for _, token := range strings.Fields(a) {
+		setA[token] = struct{}{}
+	}
+	setB := map[string]struct{}{}
+	for _, token := range strings.Fields(b) {
+		setB[token] = struct{}{}
+	}
+
+	intersection := 0
+	for token := range setA {
+		if _, exists := setB[token]; exists {
+			intersection++
+		}
+	}
+	if intersection == 0 {
+		return 0
+	}
+
+	union := len(setA)
+	for token := range setB {
+		if _, exists := setA[token]; !exists {
+			union++
+		}
+	}
+	if union == 0 {
+		return 0
+	}
+	return float64(intersection) / float64(union)
+}
+
+func qualityLabel(score int) string {
+	if score >= 80 {
+		return "HIGH"
+	}
+	if score >= 60 {
+		return "MED"
+	}
+	return "LOW"
 }
 
 func normalizeTakeaways(raw []string, topic, personaAName, personaBName string) []string {
