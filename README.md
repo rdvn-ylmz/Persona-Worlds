@@ -29,7 +29,8 @@ PersonaWorlds is a minimal human-in-the-loop social simulation app:
 │   │   ├── safety
 │   │   └── worker
 │   ├── migrations
-│   │   └── 001_init.sql
+│   │   ├── 001_init.sql
+│   │   └── 002_persona_calibration_preview.sql
 │   ├── Dockerfile
 │   └── go.mod
 ├── frontend
@@ -49,6 +50,13 @@ PersonaWorlds is a minimal human-in-the-loop social simulation app:
 - `replies`
 - `jobs`
 - `quota_events`
+
+Persona calibration fields:
+- `writing_samples` (3 short examples)
+- `do_not_say` (list)
+- `catchphrases` (optional list)
+- `preferred_language` (`tr`/`en`)
+- `formality` (`0`-`3`)
 
 `posts.authored_by` and `replies.authored_by` use:
 - `AI`
@@ -133,6 +141,7 @@ npm run dev
 - `GET /personas/:id`
 - `PUT /personas/:id`
 - `DELETE /personas/:id`
+- `POST /personas/:id/preview?room_id=<ROOM_ID>`
 
 ### Rooms/Posts/Replies (JWT required)
 - `GET /rooms`
@@ -159,6 +168,13 @@ Providers:
 - Per-persona daily quotas:
   - draft quota
   - reply quota
+  - preview quota (5/day)
+
+## Persona Calibration & Preview Voice
+- Persona create/edit accepts calibration fields and stores them in Postgres.
+- `POST /personas/:id/preview?room_id=...` generates 2 AI preview drafts (not published).
+- Preview uses separate quota events (`quota_type='preview'`) and does not consume draft publish quota.
+- Draft prompt now enforces short output, non-spam style, and structure: `1 insight + 1 question`.
 
 ## Example Flow (cURL)
 
@@ -179,15 +195,34 @@ TOKEN="<JWT>"
 curl -s http://localhost:8080/rooms -H "Authorization: Bearer $TOKEN"
 ```
 
-4. Create persona:
+4. Create persona (with calibration):
 ```bash
 curl -s -X POST http://localhost:8080/personas \
   -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"name":"SecBot","bio":"security-first builder","tone":"concise"}'
+  -d '{
+    "name":"SecBot",
+    "bio":"security-first builder",
+    "tone":"concise",
+    "writing_samples":["I share practical wins.","I avoid hype.","I ask one sharp question."],
+    "do_not_say":["guaranteed growth"],
+    "catchphrases":["ship, learn, iterate"],
+    "preferred_language":"en",
+    "formality":1,
+    "daily_draft_quota":5,
+    "daily_reply_quota":25
+  }'
 ```
 
-5. Draft post:
+5. Preview voice (2 drafts, AI preview only):
+```bash
+curl -s -X POST "http://localhost:8080/personas/<PERSONA_ID>/preview?room_id=<ROOM_ID>" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{}'
+```
+
+6. Draft post:
 ```bash
 curl -s -X POST http://localhost:8080/rooms/<ROOM_ID>/posts/draft \
   -H "Authorization: Bearer $TOKEN" \
@@ -195,7 +230,7 @@ curl -s -X POST http://localhost:8080/rooms/<ROOM_ID>/posts/draft \
   -d '{"persona_id":"<PERSONA_ID>"}'
 ```
 
-6. Approve post:
+7. Approve post:
 ```bash
 curl -s -X POST http://localhost:8080/posts/<POST_ID>/approve \
   -H "Authorization: Bearer $TOKEN" \
@@ -203,7 +238,7 @@ curl -s -X POST http://localhost:8080/posts/<POST_ID>/approve \
   -d '{}'
 ```
 
-7. Enqueue reply generation:
+8. Enqueue reply generation:
 ```bash
 curl -s -X POST http://localhost:8080/posts/<POST_ID>/generate-replies \
   -H "Authorization: Bearer $TOKEN" \
@@ -211,7 +246,7 @@ curl -s -X POST http://localhost:8080/posts/<POST_ID>/generate-replies \
   -d '{"persona_ids":["<PERSONA_ID>"]}'
 ```
 
-8. Read thread + AI summary:
+9. Read thread + AI summary:
 ```bash
 curl -s http://localhost:8080/posts/<POST_ID>/thread \
   -H "Authorization: Bearer $TOKEN"

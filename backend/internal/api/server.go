@@ -30,14 +30,19 @@ type Server struct {
 }
 
 type Persona struct {
-	ID              string    `json:"id"`
-	Name            string    `json:"name"`
-	Bio             string    `json:"bio"`
-	Tone            string    `json:"tone"`
-	DailyDraftQuota int       `json:"daily_draft_quota"`
-	DailyReplyQuota int       `json:"daily_reply_quota"`
-	CreatedAt       time.Time `json:"created_at"`
-	UpdatedAt       time.Time `json:"updated_at"`
+	ID                string    `json:"id"`
+	Name              string    `json:"name"`
+	Bio               string    `json:"bio"`
+	Tone              string    `json:"tone"`
+	WritingSamples    []string  `json:"writing_samples"`
+	DoNotSay          []string  `json:"do_not_say"`
+	Catchphrases      []string  `json:"catchphrases"`
+	PreferredLanguage string    `json:"preferred_language"`
+	Formality         int       `json:"formality"`
+	DailyDraftQuota   int       `json:"daily_draft_quota"`
+	DailyReplyQuota   int       `json:"daily_reply_quota"`
+	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
 }
 
 type Room struct {
@@ -69,6 +74,12 @@ type Reply struct {
 	Content    string    `json:"content"`
 	CreatedAt  time.Time `json:"created_at"`
 	UpdatedAt  time.Time `json:"updated_at"`
+}
+
+type PreviewDraft struct {
+	Label      string `json:"label"`
+	Content    string `json:"content"`
+	AuthoredBy string `json:"authored_by"`
 }
 
 func New(cfg config.Config, db *pgxpool.Pool, llm ai.LLMClient) *Server {
@@ -106,6 +117,7 @@ func (s *Server) Router() http.Handler {
 		r.Get("/personas/{id}", s.handleGetPersona)
 		r.Put("/personas/{id}", s.handleUpdatePersona)
 		r.Delete("/personas/{id}", s.handleDeletePersona)
+		r.Post("/personas/{id}/preview", s.handlePreviewPersona)
 
 		r.Get("/rooms", s.handleListRooms)
 		r.Get("/rooms/{id}/posts", s.handleListRoomPosts)
@@ -214,7 +226,7 @@ func (s *Server) handleListPersonas(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rows, err := s.db.Query(r.Context(), `
-		SELECT id::text, name, bio, tone, daily_draft_quota, daily_reply_quota, created_at, updated_at
+		SELECT id::text, name, bio, tone, writing_samples, do_not_say, catchphrases, preferred_language, formality, daily_draft_quota, daily_reply_quota, created_at, updated_at
 		FROM personas
 		WHERE user_id = $1
 		ORDER BY created_at DESC
@@ -228,7 +240,7 @@ func (s *Server) handleListPersonas(w http.ResponseWriter, r *http.Request) {
 	personas := make([]Persona, 0)
 	for rows.Next() {
 		var p Persona
-		if err := rows.Scan(&p.ID, &p.Name, &p.Bio, &p.Tone, &p.DailyDraftQuota, &p.DailyReplyQuota, &p.CreatedAt, &p.UpdatedAt); err != nil {
+		if err := scanPersona(rows, &p); err != nil {
 			writeError(w, http.StatusInternalServerError, "could not scan persona")
 			return
 		}
@@ -246,19 +258,29 @@ func (s *Server) handleCreatePersona(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Name            string `json:"name"`
-		Bio             string `json:"bio"`
-		Tone            string `json:"tone"`
-		DailyDraftQuota int    `json:"daily_draft_quota"`
-		DailyReplyQuota int    `json:"daily_reply_quota"`
+		Name              string   `json:"name"`
+		Bio               string   `json:"bio"`
+		Tone              string   `json:"tone"`
+		WritingSamples    []string `json:"writing_samples"`
+		DoNotSay          []string `json:"do_not_say"`
+		Catchphrases      []string `json:"catchphrases"`
+		PreferredLanguage string   `json:"preferred_language"`
+		Formality         int      `json:"formality"`
+		DailyDraftQuota   int      `json:"daily_draft_quota"`
+		DailyReplyQuota   int      `json:"daily_reply_quota"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	req.Name = strings.TrimSpace(req.Name)
-	if req.Name == "" {
+	input, err := normalizePersonaInput(req.Name, req.Bio, req.Tone, req.WritingSamples, req.DoNotSay, req.Catchphrases, req.PreferredLanguage, req.Formality)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	if input.Name == "" {
 		writeError(w, http.StatusBadRequest, "name is required")
 		return
 	}
@@ -270,12 +292,15 @@ func (s *Server) handleCreatePersona(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var p Persona
-	err := s.db.QueryRow(r.Context(), `
-		INSERT INTO personas(user_id, name, bio, tone, daily_draft_quota, daily_reply_quota)
-		VALUES ($1, $2, $3, $4, $5, $6)
-		RETURNING id::text, name, bio, tone, daily_draft_quota, daily_reply_quota, created_at, updated_at
-	`, userID, req.Name, req.Bio, req.Tone, req.DailyDraftQuota, req.DailyReplyQuota).
-		Scan(&p.ID, &p.Name, &p.Bio, &p.Tone, &p.DailyDraftQuota, &p.DailyReplyQuota, &p.CreatedAt, &p.UpdatedAt)
+	writingSamplesJSON, _ := json.Marshal(input.WritingSamples)
+	doNotSayJSON, _ := json.Marshal(input.DoNotSay)
+	catchphrasesJSON, _ := json.Marshal(input.Catchphrases)
+
+	err = scanPersona(s.db.QueryRow(r.Context(), `
+		INSERT INTO personas(user_id, name, bio, tone, writing_samples, do_not_say, catchphrases, preferred_language, formality, daily_draft_quota, daily_reply_quota)
+		VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8, $9, $10, $11)
+		RETURNING id::text, name, bio, tone, writing_samples, do_not_say, catchphrases, preferred_language, formality, daily_draft_quota, daily_reply_quota, created_at, updated_at
+	`, userID, input.Name, input.Bio, input.Tone, writingSamplesJSON, doNotSayJSON, catchphrasesJSON, input.PreferredLanguage, input.Formality, req.DailyDraftQuota, req.DailyReplyQuota), &p)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "could not create persona")
 		return
@@ -314,19 +339,28 @@ func (s *Server) handleUpdatePersona(w http.ResponseWriter, r *http.Request) {
 	personaID := chi.URLParam(r, "id")
 
 	var req struct {
-		Name            string `json:"name"`
-		Bio             string `json:"bio"`
-		Tone            string `json:"tone"`
-		DailyDraftQuota int    `json:"daily_draft_quota"`
-		DailyReplyQuota int    `json:"daily_reply_quota"`
+		Name              string   `json:"name"`
+		Bio               string   `json:"bio"`
+		Tone              string   `json:"tone"`
+		WritingSamples    []string `json:"writing_samples"`
+		DoNotSay          []string `json:"do_not_say"`
+		Catchphrases      []string `json:"catchphrases"`
+		PreferredLanguage string   `json:"preferred_language"`
+		Formality         int      `json:"formality"`
+		DailyDraftQuota   int      `json:"daily_draft_quota"`
+		DailyReplyQuota   int      `json:"daily_reply_quota"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	req.Name = strings.TrimSpace(req.Name)
-	if req.Name == "" {
+	input, err := normalizePersonaInput(req.Name, req.Bio, req.Tone, req.WritingSamples, req.DoNotSay, req.Catchphrases, req.PreferredLanguage, req.Formality)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if input.Name == "" {
 		writeError(w, http.StatusBadRequest, "name is required")
 		return
 	}
@@ -336,13 +370,16 @@ func (s *Server) handleUpdatePersona(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var p Persona
-	err := s.db.QueryRow(r.Context(), `
+	writingSamplesJSON, _ := json.Marshal(input.WritingSamples)
+	doNotSayJSON, _ := json.Marshal(input.DoNotSay)
+	catchphrasesJSON, _ := json.Marshal(input.Catchphrases)
+
+	err = scanPersona(s.db.QueryRow(r.Context(), `
 		UPDATE personas
-		SET name=$1, bio=$2, tone=$3, daily_draft_quota=$4, daily_reply_quota=$5, updated_at=NOW()
-		WHERE id=$6 AND user_id=$7
-		RETURNING id::text, name, bio, tone, daily_draft_quota, daily_reply_quota, created_at, updated_at
-	`, req.Name, req.Bio, req.Tone, req.DailyDraftQuota, req.DailyReplyQuota, personaID, userID).
-		Scan(&p.ID, &p.Name, &p.Bio, &p.Tone, &p.DailyDraftQuota, &p.DailyReplyQuota, &p.CreatedAt, &p.UpdatedAt)
+		SET name=$1, bio=$2, tone=$3, writing_samples=$4::jsonb, do_not_say=$5::jsonb, catchphrases=$6::jsonb, preferred_language=$7, formality=$8, daily_draft_quota=$9, daily_reply_quota=$10, updated_at=NOW()
+		WHERE id=$11 AND user_id=$12
+		RETURNING id::text, name, bio, tone, writing_samples, do_not_say, catchphrases, preferred_language, formality, daily_draft_quota, daily_reply_quota, created_at, updated_at
+	`, input.Name, input.Bio, input.Tone, writingSamplesJSON, doNotSayJSON, catchphrasesJSON, input.PreferredLanguage, input.Formality, req.DailyDraftQuota, req.DailyReplyQuota, personaID, userID), &p)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeError(w, http.StatusNotFound, "persona not found")
@@ -374,6 +411,90 @@ func (s *Server) handleDeletePersona(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"deleted": true})
+}
+
+func (s *Server) handlePreviewPersona(w http.ResponseWriter, r *http.Request) {
+	userID, ok := auth.UserIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "missing user")
+		return
+	}
+
+	personaID := chi.URLParam(r, "id")
+	roomID := strings.TrimSpace(r.URL.Query().Get("room_id"))
+	if roomID == "" {
+		writeError(w, http.StatusBadRequest, "room_id query param is required")
+		return
+	}
+
+	persona, err := s.getPersonaByID(r.Context(), userID, personaID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "persona not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "could not load persona")
+		return
+	}
+
+	room, err := s.getRoomByID(r.Context(), roomID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "room not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "could not load room")
+		return
+	}
+
+	used, err := s.currentQuotaUsage(r.Context(), personaID, "preview")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not check preview quota")
+		return
+	}
+	if used >= s.cfg.DefaultPreviewQuota {
+		writeError(w, http.StatusTooManyRequests, "daily preview quota reached")
+		return
+	}
+
+	drafts := make([]PreviewDraft, 0, 2)
+	for variant := 1; variant <= 2; variant++ {
+		draft, err := s.llm.GeneratePostDraft(r.Context(), personaToAIContext(persona), ai.RoomContext{
+			ID:          room.ID,
+			Name:        room.Name,
+			Description: room.Description,
+			Variant:     variant,
+		})
+		if err != nil {
+			writeError(w, http.StatusBadGateway, fmt.Sprintf("llm preview failed: %v", err))
+			return
+		}
+		if err := safety.ValidateContent(draft, s.cfg.DraftMaxLen); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		drafts = append(drafts, PreviewDraft{
+			Label:      fmt.Sprintf("AI Preview %d", variant),
+			Content:    draft,
+			AuthoredBy: "AI",
+		})
+	}
+
+	if _, err := s.db.Exec(r.Context(), `
+		INSERT INTO quota_events(persona_id, quota_type)
+		VALUES ($1, 'preview')
+	`, personaID); err != nil {
+		writeError(w, http.StatusInternalServerError, "could not record preview quota")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"drafts": drafts,
+		"quota": map[string]any{
+			"used":  used + 1,
+			"limit": s.cfg.DefaultPreviewQuota,
+		},
+	})
 }
 
 func (s *Server) handleListRooms(w http.ResponseWriter, r *http.Request) {
@@ -487,15 +608,11 @@ func (s *Server) handleCreateDraft(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	draft, err := s.llm.GeneratePostDraft(r.Context(), ai.PersonaContext{
-		ID:   persona.ID,
-		Name: persona.Name,
-		Bio:  persona.Bio,
-		Tone: persona.Tone,
-	}, ai.RoomContext{
+	draft, err := s.llm.GeneratePostDraft(r.Context(), personaToAIContext(persona), ai.RoomContext{
 		ID:          room.ID,
 		Name:        room.Name,
 		Description: room.Description,
+		Variant:     1,
 	})
 	if err != nil {
 		writeError(w, http.StatusBadGateway, fmt.Sprintf("llm draft failed: %v", err))
@@ -772,11 +889,11 @@ func (s *Server) handleGetThread(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) getPersonaByID(ctx context.Context, userID, personaID string) (Persona, error) {
 	var p Persona
-	err := s.db.QueryRow(ctx, `
-		SELECT id::text, name, bio, tone, daily_draft_quota, daily_reply_quota, created_at, updated_at
+	err := scanPersona(s.db.QueryRow(ctx, `
+		SELECT id::text, name, bio, tone, writing_samples, do_not_say, catchphrases, preferred_language, formality, daily_draft_quota, daily_reply_quota, created_at, updated_at
 		FROM personas
 		WHERE id = $1 AND user_id = $2
-	`, personaID, userID).Scan(&p.ID, &p.Name, &p.Bio, &p.Tone, &p.DailyDraftQuota, &p.DailyReplyQuota, &p.CreatedAt, &p.UpdatedAt)
+	`, personaID, userID), &p)
 	return p, err
 }
 
@@ -856,6 +973,148 @@ func (s *Server) resolvePersonaIDsForReplyGeneration(ctx context.Context, userID
 		return nil, fmt.Errorf("no personas available")
 	}
 	return ids, nil
+}
+
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
+type personaInput struct {
+	Name              string
+	Bio               string
+	Tone              string
+	WritingSamples    []string
+	DoNotSay          []string
+	Catchphrases      []string
+	PreferredLanguage string
+	Formality         int
+}
+
+func scanPersona(row rowScanner, p *Persona) error {
+	var writingSamplesRaw []byte
+	var doNotSayRaw []byte
+	var catchphrasesRaw []byte
+
+	if err := row.Scan(
+		&p.ID,
+		&p.Name,
+		&p.Bio,
+		&p.Tone,
+		&writingSamplesRaw,
+		&doNotSayRaw,
+		&catchphrasesRaw,
+		&p.PreferredLanguage,
+		&p.Formality,
+		&p.DailyDraftQuota,
+		&p.DailyReplyQuota,
+		&p.CreatedAt,
+		&p.UpdatedAt,
+	); err != nil {
+		return err
+	}
+
+	if len(writingSamplesRaw) > 0 {
+		if err := json.Unmarshal(writingSamplesRaw, &p.WritingSamples); err != nil {
+			return err
+		}
+	}
+	if len(doNotSayRaw) > 0 {
+		if err := json.Unmarshal(doNotSayRaw, &p.DoNotSay); err != nil {
+			return err
+		}
+	}
+	if len(catchphrasesRaw) > 0 {
+		if err := json.Unmarshal(catchphrasesRaw, &p.Catchphrases); err != nil {
+			return err
+		}
+	}
+
+	if p.WritingSamples == nil {
+		p.WritingSamples = []string{}
+	}
+	if p.DoNotSay == nil {
+		p.DoNotSay = []string{}
+	}
+	if p.Catchphrases == nil {
+		p.Catchphrases = []string{}
+	}
+	return nil
+}
+
+func normalizePersonaInput(name, bio, tone string, writingSamples, doNotSay, catchphrases []string, preferredLanguage string, formality int) (personaInput, error) {
+	cleanName := strings.TrimSpace(name)
+	if cleanName == "" {
+		return personaInput{}, fmt.Errorf("name is required")
+	}
+
+	cleanWritingSamples := normalizeStringSlice(writingSamples)
+	if len(cleanWritingSamples) != 3 {
+		return personaInput{}, fmt.Errorf("writing_samples must contain exactly 3 short examples")
+	}
+	for _, sample := range cleanWritingSamples {
+		if len([]rune(sample)) > 180 {
+			return personaInput{}, fmt.Errorf("writing_samples items must be <= 180 chars")
+		}
+	}
+
+	cleanDoNotSay := normalizeStringSlice(doNotSay)
+	for _, item := range cleanDoNotSay {
+		if len([]rune(item)) > 120 {
+			return personaInput{}, fmt.Errorf("do_not_say items must be <= 120 chars")
+		}
+	}
+
+	cleanCatchphrases := normalizeStringSlice(catchphrases)
+	for _, item := range cleanCatchphrases {
+		if len([]rune(item)) > 80 {
+			return personaInput{}, fmt.Errorf("catchphrases items must be <= 80 chars")
+		}
+	}
+
+	language := strings.ToLower(strings.TrimSpace(preferredLanguage))
+	if language != "tr" && language != "en" {
+		return personaInput{}, fmt.Errorf("preferred_language must be tr or en")
+	}
+
+	if formality < 0 || formality > 3 {
+		return personaInput{}, fmt.Errorf("formality must be between 0 and 3")
+	}
+
+	return personaInput{
+		Name:              cleanName,
+		Bio:               strings.TrimSpace(bio),
+		Tone:              strings.TrimSpace(tone),
+		WritingSamples:    cleanWritingSamples,
+		DoNotSay:          cleanDoNotSay,
+		Catchphrases:      cleanCatchphrases,
+		PreferredLanguage: language,
+		Formality:         formality,
+	}, nil
+}
+
+func normalizeStringSlice(items []string) []string {
+	cleaned := make([]string, 0, len(items))
+	for _, item := range items {
+		trimmed := strings.TrimSpace(item)
+		if trimmed != "" {
+			cleaned = append(cleaned, trimmed)
+		}
+	}
+	return cleaned
+}
+
+func personaToAIContext(persona Persona) ai.PersonaContext {
+	return ai.PersonaContext{
+		ID:                persona.ID,
+		Name:              persona.Name,
+		Bio:               persona.Bio,
+		Tone:              persona.Tone,
+		WritingSamples:    persona.WritingSamples,
+		DoNotSay:          persona.DoNotSay,
+		Catchphrases:      persona.Catchphrases,
+		PreferredLanguage: persona.PreferredLanguage,
+		Formality:         persona.Formality,
+	}
 }
 
 func decodeJSON(r *http.Request, dst any) error {

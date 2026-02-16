@@ -199,6 +199,11 @@ label {
   border-color: #fde047;
 }
 
+.badge-preview {
+  background: #fce7f3;
+  border-color: #f9a8d4;
+}
+
 .thread {
   border-top: 1px dashed var(--border);
   padding-top: 10px;
@@ -210,6 +215,20 @@ label {
   border: 1px solid var(--border);
   border-radius: 10px;
   padding: 8px;
+}
+
+.preview-grid {
+  display: grid;
+  gap: 10px;
+}
+
+.preview-card {
+  border: 1px dashed var(--border);
+  border-radius: 12px;
+  padding: 10px;
+  display: grid;
+  gap: 8px;
+  background: #fffdf8;
 }
 
 .mini-card {

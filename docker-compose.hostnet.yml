@@ -13,6 +13,7 @@ services:
     environment:
       DATABASE_URL: postgres://postgres:postgres@localhost:5432/personaworlds?sslmode=disable
       FRONTEND_ORIGIN: http://localhost:3000
+      DEFAULT_PREVIEW_QUOTA: "5"
 
   worker:
     network_mode: host
@@ -20,6 +21,7 @@ services:
       network: host
     environment:
       DATABASE_URL: postgres://postgres:postgres@localhost:5432/personaworlds?sslmode=disable
+      DEFAULT_PREVIEW_QUOTA: "5"
 
   seed:
     network_mode: host

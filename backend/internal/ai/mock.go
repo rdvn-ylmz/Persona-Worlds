@@ -13,13 +13,32 @@ func NewMockClient() *MockClient {
 }
 
 func (m *MockClient) GeneratePostDraft(_ context.Context, persona PersonaContext, room RoomContext) (string, error) {
-	return fmt.Sprintf(
-		"[%s | draft] In %s, %s perspective: %s. Question to room: what practical steps have worked for you?",
-		persona.Name,
-		room.Name,
-		persona.Tone,
-		persona.Bio,
-	), nil
+	language := strings.ToLower(strings.TrimSpace(persona.PreferredLanguage))
+	if language != "tr" {
+		language = "en"
+	}
+
+	insight := "small weekly experiments create compounding product learning"
+	if room.Variant == 2 {
+		insight = "shipping a visible changelog improves community trust and feedback quality"
+	}
+
+	catchphrase := ""
+	if len(persona.Catchphrases) > 0 {
+		catchphrase = strings.TrimSpace(persona.Catchphrases[0])
+	}
+
+	if language == "tr" {
+		if catchphrase != "" {
+			insight = fmt.Sprintf("%s: %s", catchphrase, insight)
+		}
+		return fmt.Sprintf("%s odasında %s için içgörü: %s. Sende bu yaklaşımın işe yaradığı bir örnek var mı?", room.Name, persona.Name, insight), nil
+	}
+
+	if catchphrase != "" {
+		insight = fmt.Sprintf("%s: %s", catchphrase, insight)
+	}
+	return fmt.Sprintf("In %s, an insight for %s is that %s. What is one concrete example where this worked for you?", room.Name, persona.Name, insight), nil
 }
 
 func (m *MockClient) GenerateReply(_ context.Context, persona PersonaContext, post PostContext, thread []ReplyContext) (string, error) {

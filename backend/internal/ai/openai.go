@@ -30,8 +30,21 @@ func NewOpenAIClient(apiKey, baseURL, model string) *OpenAIClient {
 }
 
 func (c *OpenAIClient) GeneratePostDraft(ctx context.Context, persona PersonaContext, room RoomContext) (string, error) {
-	system := "You create concise social posts for an AI persona. Keep it actionable and room-specific."
-	user := fmt.Sprintf("Persona: %s\nBio: %s\nTone: %s\nRoom: %s\nRoom Description: %s\nDraft one post in <=180 words.", persona.Name, persona.Bio, persona.Tone, room.Name, room.Description)
+	system := "You create concise social posts for an AI persona. Keep output non-spam, no links, and no hashtag stuffing."
+	user := fmt.Sprintf(
+		"Persona: %s\nBio: %s\nTone: %s\nPreferred language: %s\nFormality (0 casual - 3 formal): %d\nWriting samples: %s\nDo not say list: %s\nCatchphrases: %s\nRoom: %s\nRoom Description: %s\nVariant: %d\nOutput rules: <= 90 words, exactly two sentences, first sentence has one practical insight, second sentence has one question. Avoid banned phrases and do not sound promotional.",
+		persona.Name,
+		persona.Bio,
+		persona.Tone,
+		persona.PreferredLanguage,
+		persona.Formality,
+		formatStringList(persona.WritingSamples),
+		formatStringList(persona.DoNotSay),
+		formatStringList(persona.Catchphrases),
+		room.Name,
+		room.Description,
+		room.Variant,
+	)
 	return c.chat(ctx, system, user)
 }
 
@@ -117,4 +130,11 @@ func (c *OpenAIClient) chat(ctx context.Context, system, user string) (string, e
 		return "", errors.New("openai provider returned empty content")
 	}
 	return content, nil
+}
+
+func formatStringList(items []string) string {
+	if len(items) == 0 {
+		return "none"
+	}
+	return strings.Join(items, " | ")
 }

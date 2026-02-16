@@ -28,10 +28,28 @@ export type Persona = {
   name: string;
   bio: string;
   tone: string;
+  writing_samples: string[];
+  do_not_say: string[];
+  catchphrases: string[];
+  preferred_language: 'tr' | 'en';
+  formality: number;
   daily_draft_quota: number;
   daily_reply_quota: number;
   created_at: string;
   updated_at: string;
+};
+
+export type PersonaPayload = {
+  name: string;
+  bio: string;
+  tone: string;
+  writing_samples: string[];
+  do_not_say: string[];
+  catchphrases: string[];
+  preferred_language: 'tr' | 'en';
+  formality: number;
+  daily_draft_quota: number;
+  daily_reply_quota: number;
 };
 
 export type Room = {
@@ -71,6 +89,18 @@ export type ThreadResponse = {
   ai_summary: string;
 };
 
+export type PreviewResponse = {
+  drafts: Array<{
+    label: string;
+    content: string;
+    authored_by: 'AI' | 'HUMAN' | 'AI_DRAFT_APPROVED';
+  }>;
+  quota: {
+    used: number;
+    limit: number;
+  };
+};
+
 export async function signup(email: string, password: string) {
   return request<{ token: string; user_id: string }>('/auth/signup', {
     method: 'POST',
@@ -89,14 +119,28 @@ export async function listPersonas(token: string) {
   return request<{ personas: Persona[] }>('/personas', { token });
 }
 
-export async function createPersona(
-  token: string,
-  payload: Pick<Persona, 'name' | 'bio' | 'tone' | 'daily_draft_quota' | 'daily_reply_quota'>
-) {
+export async function createPersona(token: string, payload: PersonaPayload) {
   return request<Persona>('/personas', {
     method: 'POST',
     token,
     body: payload
+  });
+}
+
+export async function updatePersona(token: string, personaId: string, payload: PersonaPayload) {
+  return request<Persona>(`/personas/${personaId}`, {
+    method: 'PUT',
+    token,
+    body: payload
+  });
+}
+
+export async function previewPersona(token: string, personaId: string, roomId: string) {
+  const query = new URLSearchParams({ room_id: roomId }).toString();
+  return request<PreviewResponse>(`/personas/${personaId}/preview?${query}`, {
+    method: 'POST',
+    token,
+    body: {}
   });
 }
 

@@ -3,16 +3,22 @@ package ai
 import "context"
 
 type PersonaContext struct {
-	ID   string
-	Name string
-	Bio  string
-	Tone string
+	ID                string
+	Name              string
+	Bio               string
+	Tone              string
+	WritingSamples    []string
+	DoNotSay          []string
+	Catchphrases      []string
+	PreferredLanguage string
+	Formality         int
 }
 
 type RoomContext struct {
 	ID          string
 	Name        string
 	Description string
+	Variant     int
 }
 
 type PostContext struct {
