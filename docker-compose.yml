@@ -67,6 +67,7 @@ services:
       SUMMARY_MAX_LEN: "400"
       DEFAULT_PREVIEW_QUOTA: "5"
       WORKER_POLL_EVERY: 3s
+      WORKER_OBSERVABILITY_PORT: "9091"
     depends_on:
       postgres:
         condition: service_healthy
@@ -94,6 +95,37 @@ services:
       - backend
     ports:
       - "3000:3000"
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: personaworlds-prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    depends_on:
+      - backend
+      - worker
+    profiles: ["observability"]
+
+  grafana:
+    image: grafana/grafana:11.1.0
+    container_name: personaworlds-grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./observability/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./observability/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3001:3000"
+    depends_on:
+      - prometheus
+    profiles: ["observability"]
 
 volumes:
   pgdata:

@@ -1,0 +1,9 @@
+apiVersion: 1
+
+providers:
+  - name: PersonaWorlds
+    folder: PersonaWorlds
+    type: file
+    allowUiUpdates: false
+    options:
+      path: /var/lib/grafana/dashboards
