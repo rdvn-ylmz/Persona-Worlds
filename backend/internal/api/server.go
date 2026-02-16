@@ -288,6 +288,7 @@ func (s *Server) Router() http.Handler {
 		r.Post("/posts/{id}/approve", s.handleApprovePost)
 		r.Post("/posts/{id}/generate-replies", s.handleGenerateReplies)
 		r.Get("/posts/{id}/thread", s.handleGetThread)
+		r.Get("/b/{id}", s.handleGetThread)
 	})
 
 	return r
