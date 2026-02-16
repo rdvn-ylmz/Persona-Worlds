@@ -235,6 +235,7 @@ func (s *Server) Router() http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
+	r.Use(s.eventLoggingMiddleware)
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 	r.Use(cors.Handler(cors.Options{
@@ -248,6 +249,8 @@ func (s *Server) Router() http.Handler {
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	})
+
+	r.Post("/events", s.handleCreateEvent)
 
 	r.Route("/auth", func(r chi.Router) {
 		r.Post("/signup", s.handleSignup)
@@ -281,6 +284,7 @@ func (s *Server) Router() http.Handler {
 		r.Post("/posts/{id}/generate-replies", s.handleGenerateReplies)
 		r.Get("/posts/{id}/thread", s.handleGetThread)
 		r.Get("/b/{id}", s.handleGetThread)
+		r.Get("/admin/analytics/summary", s.handleAnalyticsSummary)
 	})
 
 	return r
@@ -288,8 +292,9 @@ func (s *Server) Router() http.Handler {
 
 func (s *Server) handleSignup(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Email    string `json:"email"`
-		Password string `json:"password"`
+		Email     string `json:"email"`
+		Password  string `json:"password"`
+		ShareSlug string `json:"share_slug"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		writeBadRequest(w, err.Error())
@@ -328,6 +333,14 @@ func (s *Server) handleSignup(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeInternalError(w, "could not create token")
 		return
+	}
+
+	shareSlug := normalizePublicSlug(req.ShareSlug)
+	if shareSlug != "" {
+		_ = s.insertEvent(r.Context(), userID, eventSignupFromShare, map[string]any{
+			"share_slug": shareSlug,
+			"source":     "public_profile",
+		})
 	}
 
 	writeJSON(w, http.StatusCreated, map[string]any{"token": token, "user_id": userID})
@@ -402,6 +415,11 @@ func (s *Server) handleGetPublicProfile(w http.ResponseWriter, r *http.Request) 
 		writeInternalError(w, "could not load top rooms")
 		return
 	}
+
+	_ = s.logEventFromRequest(r, eventPublicProfileViewed, map[string]any{
+		"slug":       profile.Slug,
+		"persona_id": profile.PersonaID,
+	})
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"profile":      profile,
@@ -728,6 +746,10 @@ func (s *Server) handleCreatePersona(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	_ = s.logEventFromRequest(r, eventPersonaCreated, map[string]any{
+		"persona_id": p.ID,
+	})
+
 	writeJSON(w, http.StatusCreated, p)
 }
 
@@ -888,6 +910,11 @@ func (s *Server) handlePreviewPersona(w http.ResponseWriter, r *http.Request) {
 		writeInternalError(w, "could not record preview quota")
 		return
 	}
+
+	_ = s.logEventFromRequest(r, eventPreviewGenerated, map[string]any{
+		"persona_id": personaID,
+		"room_id":    roomID,
+	})
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"drafts": drafts,
@@ -1202,6 +1229,12 @@ func (s *Server) handleApprovePost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	_ = s.logEventFromRequest(r, eventPostApproved, map[string]any{
+		"post_id":    out.ID,
+		"room_id":    out.RoomID,
+		"persona_id": strings.TrimSpace(out.PersonaID),
+	})
+
 	writeJSON(w, http.StatusOK, out)
 }
 
@@ -1297,6 +1330,13 @@ func (s *Server) handleGenerateReplies(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		enqueued++
+	}
+
+	if enqueued > 0 {
+		_ = s.logEventFromRequest(r, eventBattleCreated, map[string]any{
+			"post_id":        postID,
+			"enqueued_count": enqueued,
+		})
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{

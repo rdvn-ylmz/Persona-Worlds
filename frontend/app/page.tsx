@@ -23,11 +23,13 @@ import {
   login,
   publishPersonaProfile,
   previewPersona,
+  trackEvent,
   signup,
   updatePersona
 } from '../lib/api';
 
 const TOKEN_KEY = 'personaworlds_token';
+const SHARE_SLUG_KEY = 'personaworlds_share_slug';
 
 function Badge({ authoredBy }: { authoredBy: Post['authored_by'] | ThreadResponse['replies'][number]['authored_by'] }) {
   const className =
@@ -244,9 +246,14 @@ export default function HomePage() {
 
     try {
       setLoading(true);
-      const response = isSignup ? await signup(email, password) : await login(email, password);
+      const shareSlug =
+        isSignup && typeof window !== 'undefined' ? (localStorage.getItem(SHARE_SLUG_KEY) || '').trim() : '';
+      const response = isSignup ? await signup(email, password, shareSlug) : await login(email, password);
       localStorage.setItem(TOKEN_KEY, response.token);
       setToken(response.token);
+      if (isSignup && shareSlug) {
+        localStorage.removeItem(SHARE_SLUG_KEY);
+      }
       setMessage(isSignup ? 'Account created.' : 'Logged in.');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'auth failed');
@@ -447,6 +454,15 @@ export default function HomePage() {
     try {
       setLoading(true);
       setError('');
+      void trackEvent(
+        'battle_shared',
+        {
+          source: 'dashboard',
+          persona_id: selectedPersonaId,
+          room_id: selectedRoomId
+        },
+        token
+      ).catch(() => undefined);
       const published = await publishPersonaProfile(token, selectedPersonaId);
       const fallbackLink = typeof window !== 'undefined' ? `${window.location.origin}/p/${published.slug}` : '';
       const shareLink = published.share_url || fallbackLink;

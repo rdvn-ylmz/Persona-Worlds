@@ -4,11 +4,13 @@ type RequestOptions = {
   method?: string;
   token?: string;
   body?: unknown;
+  keepalive?: boolean;
 };
 
 async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
     method: options.method || 'GET',
+    keepalive: options.keepalive,
     headers: {
       'Content-Type': 'application/json',
       ...(options.token ? { Authorization: `Bearer ${options.token}` } : {})
@@ -184,10 +186,15 @@ export type FollowPublicPersonaResponse = {
   followers: number;
 };
 
-export async function signup(email: string, password: string) {
+export async function signup(email: string, password: string, shareSlug = '') {
+  const normalizedShareSlug = shareSlug.trim();
   return request<{ token: string; user_id: string }>('/auth/signup', {
     method: 'POST',
-    body: { email, password }
+    body: {
+      email,
+      password,
+      ...(normalizedShareSlug ? { share_slug: normalizedShareSlug } : {})
+    }
   });
 }
 
@@ -310,4 +317,16 @@ export async function generateReplies(token: string, postId: string, personaIds:
 
 export async function getThread(token: string, postId: string) {
   return request<ThreadResponse>(`/posts/${postId}/thread`, { token });
+}
+
+export async function trackEvent(eventName: string, metadata: Record<string, unknown> = {}, token?: string) {
+  return request<{ ok: boolean }>('/events', {
+    method: 'POST',
+    token,
+    keepalive: true,
+    body: {
+      event_name: eventName,
+      metadata
+    }
+  });
 }

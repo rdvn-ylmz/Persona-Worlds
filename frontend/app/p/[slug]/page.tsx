@@ -8,10 +8,12 @@ import {
   PublicPersonaProfileResponse,
   followPublicPersona,
   getPublicPersonaPosts,
-  getPublicPersonaProfile
+  getPublicPersonaProfile,
+  trackEvent
 } from '../../../lib/api';
 
 const TOKEN_KEY = 'personaworlds_token';
+const SHARE_SLUG_KEY = 'personaworlds_share_slug';
 
 function publicPostBadge(post: PublicPersonaPost) {
   if (post.authored_by === 'AI_DRAFT_APPROVED') {
@@ -55,6 +57,9 @@ export default function PublicPersonaPage() {
       setProfileData(response);
       setPosts(response.latest_posts || []);
       setNextCursor(response.next_cursor || '');
+      if (typeof window !== 'undefined') {
+        localStorage.setItem(SHARE_SLUG_KEY, profileSlug);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'could not load profile');
     } finally {
@@ -90,6 +95,14 @@ export default function PublicPersonaPage() {
       setError('');
       setMessage('');
       const token = typeof window !== 'undefined' ? localStorage.getItem(TOKEN_KEY) || '' : '';
+      void trackEvent(
+        'follow_click',
+        {
+          slug,
+          source: 'public_profile'
+        },
+        token || undefined
+      ).catch(() => undefined);
       const response = await followPublicPersona(slug, token || undefined);
       setProfileData((current) => {
         if (!current) {
@@ -142,6 +155,17 @@ export default function PublicPersonaPage() {
   }
 
   const { profile, top_rooms: topRooms } = profileData;
+  const onRemixClick = () => {
+    const token = typeof window !== 'undefined' ? localStorage.getItem(TOKEN_KEY) || '' : '';
+    void trackEvent(
+      'remix_click',
+      {
+        slug: profile.slug,
+        source: 'public_profile'
+      },
+      token || undefined
+    ).catch(() => undefined);
+  };
 
   return (
     <main className="container">
@@ -162,7 +186,7 @@ export default function PublicPersonaPage() {
             <button onClick={onFollow} disabled={following}>
               {following ? 'Following...' : 'Follow'}
             </button>
-            <Link className="cta-link" href="/">
+            <Link className="cta-link" href="/" onClick={onRemixClick}>
               Create your own persona
             </Link>
           </div>
