@@ -26,14 +26,16 @@ import (
 )
 
 type Server struct {
-	cfg                config.Config
-	db                 *pgxpool.Pool
-	llm                ai.LLMClient
-	logger             *observability.Logger
-	metrics            *observability.APIMetrics
-	publicReadLimiter  *ipRateLimiter
-	publicWriteLimiter *ipRateLimiter
-	battleCardCache    *battleCardCache
+	cfg                 config.Config
+	db                  *pgxpool.Pool
+	llm                 ai.LLMClient
+	logger              *observability.Logger
+	metrics             *observability.APIMetrics
+	publicReadLimiter   *ipRateLimiter
+	publicWriteLimiter  *ipRateLimiter
+	userBattleLimiter   *ipRateLimiter
+	userTemplateLimiter *ipRateLimiter
+	battleCardCache     *battleCardCache
 }
 
 type Persona struct {
@@ -168,14 +170,16 @@ type BattleTemplate struct {
 
 func New(cfg config.Config, db *pgxpool.Pool, llm ai.LLMClient) *Server {
 	return &Server{
-		cfg:                cfg,
-		db:                 db,
-		llm:                llm,
-		logger:             observability.NewLogger("api"),
-		metrics:            observability.NewAPIMetrics(),
-		publicReadLimiter:  newIPRateLimiter(120, time.Minute),
-		publicWriteLimiter: newIPRateLimiter(30, time.Minute),
-		battleCardCache:    newBattleCardCache(256),
+		cfg:                 cfg,
+		db:                  db,
+		llm:                 llm,
+		logger:              observability.NewLogger("api"),
+		metrics:             observability.NewAPIMetrics(),
+		publicReadLimiter:   newIPRateLimiter(120, time.Minute),
+		publicWriteLimiter:  newIPRateLimiter(30, time.Minute),
+		userBattleLimiter:   newIPRateLimiter(20, time.Minute),
+		userTemplateLimiter: newIPRateLimiter(10, time.Minute),
+		battleCardCache:     newBattleCardCache(256),
 	}
 }
 
@@ -221,7 +225,7 @@ func (s *Server) publicReadRateLimitMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		clientIP := requestClientIP(r)
 		if !s.publicReadLimiter.allow(clientIP, time.Now()) {
-			writeTooManyRequests(w, "public profile rate limit exceeded")
+			s.writeRateLimitResponse(w, r, "ip", "public_read", "public profile rate limit exceeded")
 			return
 		}
 		next.ServeHTTP(w, r)
@@ -232,7 +236,7 @@ func (s *Server) publicWriteRateLimitMiddleware(next http.Handler) http.Handler 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		clientIP := requestClientIP(r)
 		if !s.publicWriteLimiter.allow(clientIP, time.Now()) {
-			writeTooManyRequests(w, "follow rate limit exceeded")
+			s.writeRateLimitResponse(w, r, "ip", "public_write", "follow rate limit exceeded")
 			return
 		}
 		next.ServeHTTP(w, r)
@@ -254,11 +258,14 @@ func (s *Server) Router() http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
+	r.Use(s.requestContextTimeoutMiddleware)
+	r.Use(s.maxBodyBytesMiddleware(s.cfg.RequestBodyMaxBytes))
+	r.Use(s.securityHeadersMiddleware)
 	r.Use(s.requestObservabilityMiddleware)
 	r.Use(s.eventLoggingMiddleware)
 	r.Use(s.recoverJSONMiddleware)
 	r.Use(cors.Handler(cors.Options{
-		AllowedOrigins:   []string{s.cfg.FrontendOrigin, "http://localhost:3000"},
+		AllowedOrigins:   s.cfg.CORSAllowedOrigins,
 		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
 		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type"},
 		AllowCredentials: true,
@@ -269,9 +276,10 @@ func (s *Server) Router() http.Handler {
 	r.Get("/readyz", s.handleReadyz)
 	r.Get("/metrics", s.handleMetrics)
 
-	r.Post("/events", s.handleCreateEvent)
+	r.With(s.maxBodyBytesMiddleware(s.cfg.PublicBodyMaxBytes)).Post("/events", s.handleCreateEvent)
 
 	r.Route("/auth", func(r chi.Router) {
+		r.Use(s.maxBodyBytesMiddleware(s.cfg.PublicBodyMaxBytes))
 		r.Post("/signup", s.handleSignup)
 		r.Post("/login", s.handleLogin)
 	})
@@ -279,12 +287,18 @@ func (s *Server) Router() http.Handler {
 	r.Route("/p/{slug}", func(r chi.Router) {
 		r.With(s.publicReadRateLimitMiddleware).Get("/", s.handleGetPublicProfile)
 		r.With(s.publicReadRateLimitMiddleware).Get("/posts", s.handleGetPublicProfilePosts)
-		r.With(s.publicWriteRateLimitMiddleware).Post("/follow", s.handleFollowPublicProfile)
+		r.With(
+			s.publicWriteRateLimitMiddleware,
+			s.maxBodyBytesMiddleware(s.cfg.PublicBodyMaxBytes),
+		).Post("/follow", s.handleFollowPublicProfile)
 	})
 
 	r.With(s.publicReadRateLimitMiddleware).Get("/b/{id}/card.png", s.handleGetBattleCardImage)
 	r.With(s.publicReadRateLimitMiddleware).Get("/b/{id}/meta", s.handleGetPublicBattleMeta)
-	r.With(s.publicReadRateLimitMiddleware).Post("/battles/{id}/remix-intent", s.handleCreateBattleRemixIntent)
+	r.With(
+		s.publicReadRateLimitMiddleware,
+		s.maxBodyBytesMiddleware(s.cfg.PublicBodyMaxBytes),
+	).Post("/battles/{id}/remix-intent", s.handleCreateBattleRemixIntent)
 	r.With(s.publicReadRateLimitMiddleware).Get("/templates", s.handleListPublicTemplates)
 
 	r.Group(func(r chi.Router) {
@@ -454,9 +468,9 @@ func (s *Server) handleGetPublicProfile(w http.ResponseWriter, r *http.Request) 
 	})
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"profile":      profile,
-		"latest_posts": latestPosts,
-		"top_rooms":    topRooms,
+		"profile":      mapPublicProfileDTO(profile),
+		"latest_posts": mapPublicPostsDTO(latestPosts),
+		"top_rooms":    mapPublicRoomStatsDTO(topRooms),
 		"next_cursor":  nextCursor,
 	})
 }
@@ -486,7 +500,7 @@ func (s *Server) handleGetPublicProfilePosts(w http.ResponseWriter, r *http.Requ
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"posts":       posts,
+		"posts":       mapPublicPostsDTO(posts),
 		"next_cursor": nextCursor,
 	})
 }
@@ -557,7 +571,11 @@ func (s *Server) handlePublishPersonaProfile(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	personaID := chi.URLParam(r, "id")
+	personaID, err := validateUUID(chi.URLParam(r, "id"), "persona id")
+	if err != nil {
+		writeBadRequest(w, err.Error())
+		return
+	}
 	var req struct {
 		Slug string `json:"slug"`
 		Bio  string `json:"bio"`
@@ -571,7 +589,7 @@ func (s *Server) handlePublishPersonaProfile(w http.ResponseWriter, r *http.Requ
 		Name string
 		Bio  string
 	}
-	err := s.db.QueryRow(r.Context(), `
+	err = s.db.QueryRow(r.Context(), `
 		SELECT name, bio
 		FROM personas
 		WHERE id = $1 AND user_id = $2
@@ -586,10 +604,14 @@ func (s *Server) handlePublishPersonaProfile(w http.ResponseWriter, r *http.Requ
 	}
 
 	requestedSlug := strings.TrimSpace(req.Slug)
-	normalizedRequestedSlug := normalizePublicSlug(requestedSlug)
-	if requestedSlug != "" && normalizedRequestedSlug == "" {
-		writeBadRequest(w, "slug must contain only letters, numbers, spaces, hyphen or underscore")
-		return
+	normalizedRequestedSlug := ""
+	if requestedSlug != "" {
+		validatedSlug, validateErr := validateSlug(requestedSlug)
+		if validateErr != nil {
+			writeBadRequest(w, "slug must contain only letters, numbers, spaces, hyphen or underscore")
+			return
+		}
+		normalizedRequestedSlug = validatedSlug
 	}
 
 	publicBio := strings.TrimSpace(req.Bio)
@@ -666,7 +688,11 @@ func (s *Server) handleUnpublishPersonaProfile(w http.ResponseWriter, r *http.Re
 	if !ok {
 		return
 	}
-	personaID := chi.URLParam(r, "id")
+	personaID, err := validateUUID(chi.URLParam(r, "id"), "persona id")
+	if err != nil {
+		writeBadRequest(w, err.Error())
+		return
+	}
 
 	var exists bool
 	if err := s.db.QueryRow(r.Context(), `
@@ -685,7 +711,7 @@ func (s *Server) handleUnpublishPersonaProfile(w http.ResponseWriter, r *http.Re
 	}
 
 	var slug string
-	err := s.db.QueryRow(r.Context(), `
+	err = s.db.QueryRow(r.Context(), `
 		SELECT slug
 		FROM persona_public_profiles
 		WHERE persona_id = $1
@@ -794,7 +820,11 @@ func (s *Server) handleGetPersona(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	personaID := chi.URLParam(r, "id")
+	personaID, err := validateUUID(chi.URLParam(r, "id"), "persona id")
+	if err != nil {
+		writeBadRequest(w, err.Error())
+		return
+	}
 
 	p, err := s.getPersonaByID(r.Context(), userID, personaID)
 	if err != nil {
@@ -814,7 +844,11 @@ func (s *Server) handleUpdatePersona(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	personaID := chi.URLParam(r, "id")
+	personaID, err := validateUUID(chi.URLParam(r, "id"), "persona id")
+	if err != nil {
+		writeBadRequest(w, err.Error())
+		return
+	}
 
 	var req personaUpsertRequest
 	if err := decodeJSON(r, &req); err != nil {
@@ -858,7 +892,11 @@ func (s *Server) handleDeletePersona(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	personaID := chi.URLParam(r, "id")
+	personaID, err := validateUUID(chi.URLParam(r, "id"), "persona id")
+	if err != nil {
+		writeBadRequest(w, err.Error())
+		return
+	}
 
 	ct, err := s.db.Exec(r.Context(), "DELETE FROM personas WHERE id=$1 AND user_id=$2", personaID, userID)
 	if err != nil {
@@ -879,10 +917,14 @@ func (s *Server) handlePreviewPersona(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	personaID := chi.URLParam(r, "id")
-	roomID := strings.TrimSpace(r.URL.Query().Get("room_id"))
-	if roomID == "" {
-		writeBadRequest(w, "room_id query param is required")
+	personaID, err := validateUUID(chi.URLParam(r, "id"), "persona id")
+	if err != nil {
+		writeBadRequest(w, err.Error())
+		return
+	}
+	roomID, err := validateUUID(r.URL.Query().Get("room_id"), "room_id")
+	if err != nil {
+		writeBadRequest(w, err.Error())
 		return
 	}
 
@@ -966,7 +1008,11 @@ func (s *Server) handleGetTodayDigest(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	personaID := chi.URLParam(r, "id")
+	personaID, err := validateUUID(chi.URLParam(r, "id"), "persona id")
+	if err != nil {
+		writeBadRequest(w, err.Error())
+		return
+	}
 
 	owned, err := s.personaOwnedByUser(r.Context(), userID, personaID)
 	if err != nil {
@@ -998,7 +1044,11 @@ func (s *Server) handleGetLatestDigest(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	personaID := chi.URLParam(r, "id")
+	personaID, err := validateUUID(chi.URLParam(r, "id"), "persona id")
+	if err != nil {
+		writeBadRequest(w, err.Error())
+		return
+	}
 
 	owned, err := s.personaOwnedByUser(r.Context(), userID, personaID)
 	if err != nil {
@@ -1055,7 +1105,11 @@ func (s *Server) handleListRoomPosts(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	roomID := chi.URLParam(r, "id")
+	roomID, err := validateUUID(chi.URLParam(r, "id"), "room id")
+	if err != nil {
+		writeBadRequest(w, err.Error())
+		return
+	}
 
 	rows, err := s.db.Query(r.Context(), `
 		SELECT p.id::text, p.room_id::text, COALESCE(p.persona_id::text, ''), COALESCE(pr.name, ''), p.authored_by::text, p.status::text, p.content, p.created_at, p.updated_at
@@ -1090,7 +1144,11 @@ func (s *Server) handleCreateDraft(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	roomID := chi.URLParam(r, "id")
+	roomID, err := validateUUID(chi.URLParam(r, "id"), "room id")
+	if err != nil {
+		writeBadRequest(w, err.Error())
+		return
+	}
 
 	var req struct {
 		PersonaID string `json:"persona_id"`
@@ -1099,8 +1157,9 @@ func (s *Server) handleCreateDraft(w http.ResponseWriter, r *http.Request) {
 		writeBadRequest(w, err.Error())
 		return
 	}
-	if req.PersonaID == "" {
-		writeBadRequest(w, "persona_id is required")
+	req.PersonaID, err = validateUUID(req.PersonaID, "persona_id")
+	if err != nil {
+		writeBadRequest(w, err.Error())
 		return
 	}
 
@@ -1179,11 +1238,15 @@ func (s *Server) handleApprovePost(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	postID := chi.URLParam(r, "id")
+	postID, err := validateUUID(chi.URLParam(r, "id"), "post id")
+	if err != nil {
+		writeBadRequest(w, err.Error())
+		return
+	}
 
 	var current Post
 	var ownerUserID string
-	err := s.db.QueryRow(r.Context(), `
+	err = s.db.QueryRow(r.Context(), `
 		SELECT id::text, room_id::text, COALESCE(persona_id::text, ''), authored_by::text, status::text, content, created_at, updated_at, user_id::text
 		FROM posts
 		WHERE id = $1
@@ -1279,10 +1342,14 @@ func (s *Server) handleGenerateReplies(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	postID := chi.URLParam(r, "id")
+	postID, err := validateUUID(chi.URLParam(r, "id"), "post id")
+	if err != nil {
+		writeBadRequest(w, err.Error())
+		return
+	}
 
 	var postStatus string
-	err := s.db.QueryRow(r.Context(), `
+	err = s.db.QueryRow(r.Context(), `
 		SELECT status::text
 		FROM posts
 		WHERE id=$1
@@ -1397,11 +1464,15 @@ func (s *Server) handleGetThread(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	postID := chi.URLParam(r, "id")
+	postID, err := validateUUID(chi.URLParam(r, "id"), "post id")
+	if err != nil {
+		writeBadRequest(w, err.Error())
+		return
+	}
 
 	var post Post
 	var postOwner string
-	err := s.db.QueryRow(r.Context(), `
+	err = s.db.QueryRow(r.Context(), `
 		SELECT p.id::text, p.room_id::text, COALESCE(p.persona_id::text, ''), COALESCE(pr.name, ''), p.authored_by::text, p.status::text, p.content, p.created_at, p.updated_at, p.user_id::text
 		FROM posts p
 		LEFT JOIN personas pr ON pr.id = p.persona_id

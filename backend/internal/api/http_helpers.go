@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strings"
 
 	"personaworlds/backend/internal/auth"
 )
@@ -13,7 +14,7 @@ func decodeJSON(r *http.Request, dst any) error {
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(dst); err != nil {
-		return err
+		return normalizeDecodeError(err)
 	}
 	if err := decoder.Decode(&struct{}{}); err != io.EOF {
 		return errors.New("request body must contain a single JSON object")
@@ -29,12 +30,26 @@ func decodeJSONAllowEmpty(r *http.Request, dst any) error {
 		return nil
 	}
 	if err != nil {
-		return err
+		return normalizeDecodeError(err)
 	}
 	if err := decoder.Decode(&struct{}{}); err != io.EOF {
 		return errors.New("request body must contain a single JSON object")
 	}
 	return nil
+}
+
+func normalizeDecodeError(err error) error {
+	if err == nil {
+		return nil
+	}
+	var maxBytesErr *http.MaxBytesError
+	if errors.As(err, &maxBytesErr) {
+		return errors.New("request body too large")
+	}
+	if strings.Contains(strings.ToLower(err.Error()), "request body too large") {
+		return errors.New("request body too large")
+	}
+	return err
 }
 
 func writeJSON(w http.ResponseWriter, status int, payload any) {

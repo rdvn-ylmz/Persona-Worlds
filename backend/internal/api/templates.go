@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"personaworlds/backend/internal/common"
 
@@ -79,6 +80,10 @@ func (s *Server) listPublicTemplates(ctx context.Context, limit int) ([]BattleTe
 func (s *Server) handleCreateTemplate(w http.ResponseWriter, r *http.Request) {
 	userID, ok := s.requireUserID(w, r)
 	if !ok {
+		return
+	}
+	if !s.userTemplateLimiter.allow("template:"+strings.TrimSpace(userID), time.Now()) {
+		s.writeRateLimitResponse(w, r, "user", "template_create", "template creation rate limit exceeded")
 		return
 	}
 
@@ -240,9 +245,13 @@ func (s *Server) handleCreateBattle(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	roomID := strings.TrimSpace(chi.URLParam(r, "id"))
-	if roomID == "" {
-		writeBadRequest(w, "room id is required")
+	if !s.userBattleLimiter.allow("battle:"+strings.TrimSpace(userID), time.Now()) {
+		s.writeRateLimitResponse(w, r, "user", "battle_create", "battle creation rate limit exceeded")
+		return
+	}
+	roomID, err := validateUUID(chi.URLParam(r, "id"), "room id")
+	if err != nil {
+		writeBadRequest(w, err.Error())
 		return
 	}
 
@@ -270,6 +279,14 @@ func (s *Server) handleCreateBattle(w http.ResponseWriter, r *http.Request) {
 
 	topic := strings.TrimSpace(req.Topic)
 	templateID := strings.TrimSpace(req.TemplateID)
+	if templateID != "" {
+		cleanTemplateID, validateErr := validateUUID(templateID, "template id")
+		if validateErr != nil {
+			writeBadRequest(w, validateErr.Error())
+			return
+		}
+		templateID = cleanTemplateID
+	}
 	proStyle := strings.TrimSpace(req.ProStyle)
 	conStyle := strings.TrimSpace(req.ConStyle)
 	remixUsed := false
@@ -301,9 +318,9 @@ func (s *Server) handleCreateBattle(w http.ResponseWriter, r *http.Request) {
 		remixUsed = true
 	}
 
-	topic = common.TruncateRunes(topic, 180)
-	if strings.TrimSpace(topic) == "" {
-		writeBadRequest(w, "topic is required")
+	topic, err = validateTopic(topic, 3, 180)
+	if err != nil {
+		writeBadRequest(w, err.Error())
 		return
 	}
 	if proStyle == "" {
@@ -382,6 +399,16 @@ func (s *Server) handleCreateBattle(w http.ResponseWriter, r *http.Request) {
 			"source_battle_id": sourceBattleID,
 			"room_id":          room.ID,
 			"template_id":      template.ID,
+		})
+
+		http.SetCookie(w, &http.Cookie{
+			Name:     "pw_remix_intent",
+			Value:    "",
+			Path:     "/",
+			HttpOnly: true,
+			MaxAge:   -1,
+			SameSite: http.SameSiteLaxMode,
+			Secure:   s.cfg.SecureCookies,
 		})
 	}
 

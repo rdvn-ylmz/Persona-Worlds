@@ -60,6 +60,7 @@ type APIMetrics struct {
 	httpDurations map[apiDurationKey]*histogram
 	dbQuery       *histogram
 	queueDepth    map[string]float64
+	rateLimited   map[rateLimitKey]uint64
 }
 
 func NewAPIMetrics() *APIMetrics {
@@ -68,7 +69,13 @@ func NewAPIMetrics() *APIMetrics {
 		httpDurations: map[apiDurationKey]*histogram{},
 		dbQuery:       newHistogram(defaultDurationBuckets),
 		queueDepth:    map[string]float64{},
+		rateLimited:   map[rateLimitKey]uint64{},
 	}
+}
+
+type rateLimitKey struct {
+	scope    string
+	endpoint string
 }
 
 func (m *APIMetrics) ObserveHTTPRequest(route, method string, status int, duration time.Duration) {
@@ -118,6 +125,19 @@ func (m *APIMetrics) SetQueueDepthSnapshot(values map[string]int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.queueDepth = snapshot
+}
+
+func (m *APIMetrics) IncRateLimited(scope, endpoint string) {
+	if m == nil {
+		return
+	}
+	key := rateLimitKey{
+		scope:    normalizeMetricValue(scope, "unknown"),
+		endpoint: normalizeMetricValue(endpoint, "unknown"),
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.rateLimited[key]++
 }
 
 func (m *APIMetrics) Render() string {
@@ -195,6 +215,30 @@ func (m *APIMetrics) Render() string {
 		sb.WriteString(formatLabels(labels))
 		sb.WriteString(" ")
 		sb.WriteString(strconv.FormatFloat(m.queueDepth[jobType], 'g', -1, 64))
+		sb.WriteString("\n")
+	}
+
+	sb.WriteString("# HELP rate_limit_events_total Rate-limit rejections by scope and endpoint.\n")
+	sb.WriteString("# TYPE rate_limit_events_total counter\n")
+	limitedKeys := make([]rateLimitKey, 0, len(m.rateLimited))
+	for key := range m.rateLimited {
+		limitedKeys = append(limitedKeys, key)
+	}
+	sort.Slice(limitedKeys, func(i, j int) bool {
+		if limitedKeys[i].scope != limitedKeys[j].scope {
+			return limitedKeys[i].scope < limitedKeys[j].scope
+		}
+		return limitedKeys[i].endpoint < limitedKeys[j].endpoint
+	})
+	for _, key := range limitedKeys {
+		labels := map[string]string{
+			"scope":    key.scope,
+			"endpoint": key.endpoint,
+		}
+		sb.WriteString("rate_limit_events_total")
+		sb.WriteString(formatLabels(labels))
+		sb.WriteString(" ")
+		sb.WriteString(strconv.FormatUint(m.rateLimited[key], 10))
 		sb.WriteString("\n")
 	}
 

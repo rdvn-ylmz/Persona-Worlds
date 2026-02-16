@@ -138,14 +138,12 @@ func (s *Server) handleListNotifications(w http.ResponseWriter, r *http.Request)
 	}
 
 	limit := 20
-	if rawLimit := strings.TrimSpace(r.URL.Query().Get("limit")); rawLimit != "" {
-		parsed, err := strconv.Atoi(rawLimit)
-		if err != nil {
-			writeBadRequest(w, "limit must be a number")
-			return
-		}
-		limit = parsed
+	parsedLimit, err := parsePaginationLimit(r.URL.Query().Get("limit"), 20, 1, 100)
+	if err != nil {
+		writeBadRequest(w, err.Error())
+		return
 	}
+	limit = parsedLimit
 
 	notifications, unreadCount, err := s.listNotifications(r.Context(), userID, limit)
 	if err != nil {

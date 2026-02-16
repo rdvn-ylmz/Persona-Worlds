@@ -95,9 +95,9 @@ func (c *battleCardCache) set(key string, value []byte) {
 }
 
 func (s *Server) handleGetBattleCardImage(w http.ResponseWriter, r *http.Request) {
-	battleID := strings.TrimSpace(chi.URLParam(r, "id"))
-	if battleID == "" {
-		writeNotFound(w, "battle not found")
+	battleID, err := validateUUID(chi.URLParam(r, "id"), "battle id")
+	if err != nil {
+		writeBadRequest(w, err.Error())
 		return
 	}
 

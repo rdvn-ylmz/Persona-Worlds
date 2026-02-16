@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -69,18 +70,18 @@ func Middleware(secret string) func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			header := r.Header.Get("Authorization")
 			if header == "" {
-				http.Error(w, "missing auth header", http.StatusUnauthorized)
+				writeAuthError(w, http.StatusUnauthorized, "missing auth header")
 				return
 			}
 			parts := strings.SplitN(header, " ", 2)
 			if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
-				http.Error(w, "invalid auth header", http.StatusUnauthorized)
+				writeAuthError(w, http.StatusUnauthorized, "invalid auth header")
 				return
 			}
 
 			claims, err := ParseToken(secret, parts[1])
 			if err != nil {
-				http.Error(w, "invalid token", http.StatusUnauthorized)
+				writeAuthError(w, http.StatusUnauthorized, "invalid token")
 				return
 			}
 
@@ -88,6 +89,12 @@ func Middleware(secret string) func(http.Handler) http.Handler {
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
+}
+
+func writeAuthError(w http.ResponseWriter, status int, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]any{"error": strings.TrimSpace(message)})
 }
 
 func UserIDFromContext(ctx context.Context) (string, bool) {

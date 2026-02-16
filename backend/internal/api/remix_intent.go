@@ -33,30 +33,21 @@ type remixIntentTemplateSummary struct {
 }
 
 func (s *Server) handleGetPublicBattleMeta(w http.ResponseWriter, r *http.Request) {
-	battleID := strings.TrimSpace(chi.URLParam(r, "id"))
-	if battleID == "" {
-		writeNotFound(w, "battle not found")
+	battleID, err := validateUUID(chi.URLParam(r, "id"), "battle id")
+	if err != nil {
+		writeBadRequest(w, err.Error())
 		return
 	}
 
 	var (
-		out struct {
-			BattleID  string `json:"battle_id"`
-			RoomID    string `json:"room_id"`
-			RoomName  string `json:"room_name"`
-			Topic     string `json:"topic"`
-			CreatedAt string `json:"created_at"`
-			Template  any    `json:"template,omitempty"`
-			ShareURL  string `json:"share_url"`
-			CardURL   string `json:"card_url"`
-		}
+		out          PublicBattleMetaDTO
 		content      string
 		templateID   string
 		templateName string
 		createdAt    time.Time
 	)
 
-	err := s.db.QueryRow(r.Context(), `
+	err = s.db.QueryRow(r.Context(), `
 		SELECT
 			p.id::text,
 			p.room_id::text,
@@ -108,9 +99,9 @@ func (s *Server) handleGetPublicBattleMeta(w http.ResponseWriter, r *http.Reques
 }
 
 func (s *Server) handleCreateBattleRemixIntent(w http.ResponseWriter, r *http.Request) {
-	battleID := strings.TrimSpace(chi.URLParam(r, "id"))
-	if battleID == "" {
-		writeNotFound(w, "battle not found")
+	battleID, err := validateUUID(chi.URLParam(r, "id"), "battle id")
+	if err != nil {
+		writeBadRequest(w, err.Error())
 		return
 	}
 
@@ -120,7 +111,7 @@ func (s *Server) handleCreateBattleRemixIntent(w http.ResponseWriter, r *http.Re
 		postContent string
 		templateID  string
 	)
-	err := s.db.QueryRow(r.Context(), `
+	err = s.db.QueryRow(r.Context(), `
 		SELECT
 			p.room_id::text,
 			COALESCE(rm.name, ''),
@@ -175,6 +166,7 @@ func (s *Server) handleCreateBattleRemixIntent(w http.ResponseWriter, r *http.Re
 		HttpOnly: true,
 		MaxAge:   int((30 * time.Minute).Seconds()),
 		SameSite: http.SameSiteLaxMode,
+		Secure:   s.cfg.SecureCookies,
 	})
 
 	_ = s.logEventFromRequest(r, eventRemixStarted, map[string]any{

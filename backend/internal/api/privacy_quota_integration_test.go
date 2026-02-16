@@ -274,6 +274,78 @@ func TestBattleEndpointDoesNotLeakPersonaCalibrationFieldsIntegration(t *testing
 	assertNoCalibrationFields(t, battleRecorder.Body.Bytes())
 }
 
+func TestPublicProfilePostsDoesNotLeakPersonaCalibrationFieldsIntegration(t *testing.T) {
+	fixture := newIntegrationFixture(t, integrationFixtureOptions{})
+
+	if _, err := fixture.pool.Exec(fixture.ctx, `
+		INSERT INTO posts(room_id, persona_id, user_id, authored_by, status, content, published_at)
+		VALUES ($1, $2, $3, 'AI_DRAFT_APPROVED', 'PUBLISHED', $4, NOW())
+	`, fixture.roomID, fixture.personaID, fixture.userID, "Public posts integration check."); err != nil {
+		t.Fatalf("insert post failed: %v", err)
+	}
+
+	publishRecorder := doJSONRequest(
+		fixture.server,
+		http.MethodPost,
+		"/personas/"+fixture.personaID+"/publish-profile",
+		fixture.token,
+		`{}`,
+	)
+	if publishRecorder.Code != http.StatusOK {
+		t.Fatalf("expected publish 200, got %d, body: %s", publishRecorder.Code, publishRecorder.Body.String())
+	}
+
+	var publishResp struct {
+		Slug string `json:"slug"`
+	}
+	if err := json.Unmarshal(publishRecorder.Body.Bytes(), &publishResp); err != nil {
+		t.Fatalf("decode publish response failed: %v", err)
+	}
+	if strings.TrimSpace(publishResp.Slug) == "" {
+		t.Fatalf("publish slug is empty")
+	}
+
+	postsRecorder := doJSONRequest(
+		fixture.server,
+		http.MethodGet,
+		"/p/"+publishResp.Slug+"/posts",
+		"",
+		"",
+	)
+	if postsRecorder.Code != http.StatusOK {
+		t.Fatalf("expected public posts 200, got %d, body: %s", postsRecorder.Code, postsRecorder.Body.String())
+	}
+
+	assertNoCalibrationFields(t, postsRecorder.Body.Bytes())
+}
+
+func TestPublicBattleMetaDoesNotLeakPersonaCalibrationFieldsIntegration(t *testing.T) {
+	fixture := newIntegrationFixture(t, integrationFixtureOptions{})
+
+	var postID string
+	err := fixture.pool.QueryRow(fixture.ctx, `
+		INSERT INTO posts(room_id, persona_id, user_id, authored_by, status, content, published_at)
+		VALUES ($1, $2, $3, 'AI_DRAFT_APPROVED', 'PUBLISHED', $4, NOW())
+		RETURNING id::text
+	`, fixture.roomID, fixture.personaID, fixture.userID, "Public battle meta integration post.").Scan(&postID)
+	if err != nil {
+		t.Fatalf("insert post failed: %v", err)
+	}
+
+	metaRecorder := doJSONRequest(
+		fixture.server,
+		http.MethodGet,
+		"/b/"+postID+"/meta",
+		"",
+		"",
+	)
+	if metaRecorder.Code != http.StatusOK {
+		t.Fatalf("expected public battle meta 200, got %d, body: %s", metaRecorder.Code, metaRecorder.Body.String())
+	}
+
+	assertNoCalibrationFields(t, metaRecorder.Body.Bytes())
+}
+
 func TestPreviewQuotaAndBattleDailyLimitIntegration(t *testing.T) {
 	fixture := newIntegrationFixture(t, integrationFixtureOptions{
 		defaultPreviewQuota: 2,
