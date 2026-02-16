@@ -158,6 +158,46 @@ type PublicRoomStat struct {
 	PostCount int    `json:"post_count"`
 }
 
+type BattlePersona struct {
+	ID                string `json:"id"`
+	Name              string `json:"name"`
+	Bio               string `json:"bio"`
+	Tone              string `json:"tone"`
+	PreferredLanguage string `json:"preferred_language"`
+	Formality         int    `json:"formality"`
+}
+
+type BattleVerdict struct {
+	Verdict   string   `json:"verdict"`
+	Takeaways []string `json:"takeaways"`
+}
+
+type BattleTurn struct {
+	BattleID   string    `json:"battle_id"`
+	TurnIndex  int       `json:"turn_index"`
+	PersonaID  string    `json:"persona_id"`
+	Persona    string    `json:"persona_name"`
+	Content    string    `json:"content"`
+	CreatedAt  time.Time `json:"created_at"`
+}
+
+type Battle struct {
+	ID        string       `json:"id"`
+	RoomID    string       `json:"room_id"`
+	RoomName  string       `json:"room_name"`
+	Topic     string       `json:"topic"`
+	Status    string       `json:"status"`
+	PersonaA  BattlePersona `json:"persona_a"`
+	PersonaB  BattlePersona `json:"persona_b"`
+	Turns     []BattleTurn `json:"turns"`
+	Verdict   BattleVerdict `json:"verdict"`
+	Error     string       `json:"error,omitempty"`
+	CreatedAt time.Time    `json:"created_at"`
+	UpdatedAt time.Time    `json:"updated_at"`
+}
+
+const dailyBattleCreateLimit = 10
+
 func New(cfg config.Config, db *pgxpool.Pool, llm ai.LLMClient) *Server {
 	return &Server{
 		cfg:                cfg,
@@ -268,6 +308,8 @@ func (s *Server) Router() http.Handler {
 		r.With(s.publicWriteRateLimitMiddleware).Post("/follow", s.handleFollowPublicProfile)
 	})
 
+	r.With(s.publicReadRateLimitMiddleware).Get("/b/{id}", s.handleGetPublicBattle)
+
 	r.Group(func(r chi.Router) {
 		r.Use(auth.Middleware(s.cfg.JWTSecret))
 
@@ -284,7 +326,9 @@ func (s *Server) Router() http.Handler {
 
 		r.Get("/rooms", s.handleListRooms)
 		r.Get("/rooms/{id}/posts", s.handleListRoomPosts)
+		r.Post("/rooms/{id}/battles", s.handleCreateBattle)
 		r.Post("/rooms/{id}/posts/draft", s.handleCreateDraft)
+		r.Get("/battles/{id}", s.handleGetBattle)
 		r.Post("/posts/{id}/approve", s.handleApprovePost)
 		r.Post("/posts/{id}/generate-replies", s.handleGenerateReplies)
 		r.Get("/posts/{id}/thread", s.handleGetThread)
@@ -1079,6 +1123,174 @@ func (s *Server) handleListRoomPosts(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"posts": posts})
 }
 
+func (s *Server) handleCreateBattle(w http.ResponseWriter, r *http.Request) {
+	userID, ok := auth.UserIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "missing user")
+		return
+	}
+	roomID := chi.URLParam(r, "id")
+
+	var req struct {
+		Topic      string `json:"topic"`
+		PersonaAID string `json:"persona_a_id"`
+		PersonaBID string `json:"persona_b_id"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	req.Topic = strings.TrimSpace(req.Topic)
+	req.PersonaAID = strings.TrimSpace(req.PersonaAID)
+	req.PersonaBID = strings.TrimSpace(req.PersonaBID)
+
+	if req.Topic == "" {
+		writeError(w, http.StatusBadRequest, "topic is required")
+		return
+	}
+	if req.PersonaAID == "" || req.PersonaBID == "" {
+		writeError(w, http.StatusBadRequest, "persona_a_id and persona_b_id are required")
+		return
+	}
+	if req.PersonaAID == req.PersonaBID {
+		writeError(w, http.StatusBadRequest, "choose two different personas")
+		return
+	}
+	if err := safety.ValidateContent(req.Topic, 240); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	room, err := s.getRoomByID(r.Context(), roomID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "room not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "could not load room")
+		return
+	}
+
+	personaAOwned, err := s.personaOwnedByUser(r.Context(), userID, req.PersonaAID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not validate persona")
+		return
+	}
+	personaBOwned, err := s.personaOwnedByUser(r.Context(), userID, req.PersonaBID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not validate persona")
+		return
+	}
+	if !personaAOwned || !personaBOwned {
+		writeError(w, http.StatusNotFound, "persona not found")
+		return
+	}
+
+	var createdToday int
+	if err := s.db.QueryRow(r.Context(), `
+		SELECT COUNT(*)::int
+		FROM battle_creation_events
+		WHERE user_id = $1
+		  AND created_at >= date_trunc('day', NOW())
+	`, userID).Scan(&createdToday); err != nil {
+		writeError(w, http.StatusInternalServerError, "could not check battle rate limit")
+		return
+	}
+	if createdToday >= dailyBattleCreateLimit {
+		writeError(w, http.StatusTooManyRequests, "daily battle limit reached")
+		return
+	}
+
+	tx, err := s.db.Begin(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not start transaction")
+		return
+	}
+	defer tx.Rollback(r.Context())
+
+	var battleID string
+	err = tx.QueryRow(r.Context(), `
+		INSERT INTO battles(room_id, topic, persona_a_id, persona_b_id, status, verdict, error)
+		VALUES ($1, $2, $3, $4, 'PENDING', '{}'::jsonb, '')
+		RETURNING id::text
+	`, room.ID, req.Topic, req.PersonaAID, req.PersonaBID).Scan(&battleID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not create battle")
+		return
+	}
+
+	if _, err := tx.Exec(r.Context(), `
+		INSERT INTO battle_creation_events(user_id, battle_id)
+		VALUES ($1, $2)
+	`, userID, battleID); err != nil {
+		writeError(w, http.StatusInternalServerError, "could not enqueue battle")
+		return
+	}
+
+	if err := tx.Commit(r.Context()); err != nil {
+		writeError(w, http.StatusInternalServerError, "could not commit battle")
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"battle_id":  battleID,
+		"status":     "PENDING",
+		"share_url":  fmt.Sprintf("%s/b/%s", strings.TrimRight(s.cfg.FrontendOrigin, "/"), battleID),
+		"room_id":    room.ID,
+		"room_name":  room.Name,
+		"topic":      req.Topic,
+		"queued":     true,
+		"daily_limit": dailyBattleCreateLimit,
+	})
+}
+
+func (s *Server) handleGetBattle(w http.ResponseWriter, r *http.Request) {
+	userID, ok := auth.UserIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "missing user")
+		return
+	}
+	battleID := strings.TrimSpace(chi.URLParam(r, "id"))
+	if battleID == "" {
+		writeError(w, http.StatusNotFound, "battle not found")
+		return
+	}
+
+	battle, err := s.getBattleByID(r.Context(), battleID, userID, true)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "battle not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "could not load battle")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"battle": battle})
+}
+
+func (s *Server) handleGetPublicBattle(w http.ResponseWriter, r *http.Request) {
+	battleID := strings.TrimSpace(chi.URLParam(r, "id"))
+	if battleID == "" {
+		writeError(w, http.StatusNotFound, "battle not found")
+		return
+	}
+
+	battle, err := s.getBattleByID(r.Context(), battleID, "", false)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "battle not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "could not load battle")
+		return
+	}
+
+	battle.Error = ""
+	writeJSON(w, http.StatusOK, map[string]any{"battle": battle})
+}
+
 func (s *Server) handleCreateDraft(w http.ResponseWriter, r *http.Request) {
 	userID, ok := auth.UserIDFromContext(r.Context())
 	if !ok {
@@ -1434,6 +1646,147 @@ func (s *Server) handleGetThread(w http.ResponseWriter, r *http.Request) {
 		"replies":    replies,
 		"ai_summary": summary,
 	})
+}
+
+func (s *Server) getBattleByID(ctx context.Context, battleID, userID string, requireOwnership bool) (Battle, error) {
+	var (
+		battle     Battle
+		verdictRaw []byte
+	)
+
+	baseQuery := `
+		SELECT
+			b.id::text,
+			b.room_id::text,
+			COALESCE(r.name, ''),
+			b.topic,
+			b.status::text,
+			pa.id::text,
+			pa.name,
+			pa.bio,
+			pa.tone,
+			pa.preferred_language,
+			pa.formality,
+			pb.id::text,
+			pb.name,
+			pb.bio,
+			pb.tone,
+			pb.preferred_language,
+			pb.formality,
+			b.verdict,
+			COALESCE(b.error, ''),
+			b.created_at,
+			b.updated_at
+		FROM battles b
+		JOIN rooms r ON r.id = b.room_id
+		JOIN personas pa ON pa.id = b.persona_a_id
+		JOIN personas pb ON pb.id = b.persona_b_id
+		WHERE b.id = $1
+	`
+
+	query := baseQuery
+	args := []any{battleID}
+	if requireOwnership {
+		query += " AND pa.user_id = $2 AND pb.user_id = $2"
+		args = append(args, userID)
+	}
+
+	err := s.db.QueryRow(ctx, query, args...).Scan(
+		&battle.ID,
+		&battle.RoomID,
+		&battle.RoomName,
+		&battle.Topic,
+		&battle.Status,
+		&battle.PersonaA.ID,
+		&battle.PersonaA.Name,
+		&battle.PersonaA.Bio,
+		&battle.PersonaA.Tone,
+		&battle.PersonaA.PreferredLanguage,
+		&battle.PersonaA.Formality,
+		&battle.PersonaB.ID,
+		&battle.PersonaB.Name,
+		&battle.PersonaB.Bio,
+		&battle.PersonaB.Tone,
+		&battle.PersonaB.PreferredLanguage,
+		&battle.PersonaB.Formality,
+		&verdictRaw,
+		&battle.Error,
+		&battle.CreatedAt,
+		&battle.UpdatedAt,
+	)
+	if err != nil {
+		return Battle{}, err
+	}
+
+	if err := hydrateBattleVerdict(&battle, verdictRaw); err != nil {
+		return Battle{}, err
+	}
+
+	turns, err := s.listBattleTurns(ctx, battle.ID)
+	if err != nil {
+		return Battle{}, err
+	}
+	battle.Turns = turns
+	return battle, nil
+}
+
+func (s *Server) listBattleTurns(ctx context.Context, battleID string) ([]BattleTurn, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT
+			bt.battle_id::text,
+			bt.turn_index,
+			bt.persona_id::text,
+			COALESCE(p.name, ''),
+			bt.content,
+			bt.created_at
+		FROM battle_turns bt
+		LEFT JOIN personas p ON p.id = bt.persona_id
+		WHERE bt.battle_id = $1
+		ORDER BY bt.turn_index ASC
+	`, battleID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	turns := make([]BattleTurn, 0)
+	for rows.Next() {
+		var turn BattleTurn
+		if err := rows.Scan(&turn.BattleID, &turn.TurnIndex, &turn.PersonaID, &turn.Persona, &turn.Content, &turn.CreatedAt); err != nil {
+			return nil, err
+		}
+		turns = append(turns, turn)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return turns, nil
+}
+
+func hydrateBattleVerdict(battle *Battle, verdictRaw []byte) error {
+	battle.Verdict = BattleVerdict{
+		Verdict:   "",
+		Takeaways: []string{},
+	}
+	if len(verdictRaw) == 0 {
+		return nil
+	}
+	if err := json.Unmarshal(verdictRaw, &battle.Verdict); err != nil {
+		return err
+	}
+	battle.Verdict.Verdict = strings.TrimSpace(battle.Verdict.Verdict)
+	if battle.Verdict.Takeaways == nil {
+		battle.Verdict.Takeaways = []string{}
+	}
+	cleanTakeaways := make([]string, 0, len(battle.Verdict.Takeaways))
+	for _, takeaway := range battle.Verdict.Takeaways {
+		trimmed := strings.TrimSpace(takeaway)
+		if trimmed != "" {
+			cleanTakeaways = append(cleanTakeaways, trimmed)
+		}
+	}
+	battle.Verdict.Takeaways = cleanTakeaways
+	return nil
 }
 
 func (s *Server) getPersonaByID(ctx context.Context, userID, personaID string) (Persona, error) {

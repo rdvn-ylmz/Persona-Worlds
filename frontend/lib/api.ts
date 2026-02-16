@@ -89,6 +89,61 @@ export type ThreadResponse = {
   ai_summary: string;
 };
 
+export type BattleStatus = 'PENDING' | 'PROCESSING' | 'DONE' | 'FAILED';
+
+export type BattlePersona = {
+  id: string;
+  name: string;
+  bio: string;
+  tone: string;
+  preferred_language: 'tr' | 'en' | string;
+  formality: number;
+};
+
+export type BattleTurn = {
+  battle_id: string;
+  turn_index: number;
+  persona_id: string;
+  persona_name: string;
+  content: string;
+  created_at: string;
+};
+
+export type BattleVerdict = {
+  verdict: string;
+  takeaways: string[];
+};
+
+export type Battle = {
+  id: string;
+  room_id: string;
+  room_name: string;
+  topic: string;
+  status: BattleStatus;
+  persona_a: BattlePersona;
+  persona_b: BattlePersona;
+  turns: BattleTurn[];
+  verdict: BattleVerdict;
+  error?: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type BattleResponse = {
+  battle: Battle;
+};
+
+export type CreateBattleResponse = {
+  battle_id: string;
+  status: BattleStatus;
+  share_url: string;
+  room_id: string;
+  room_name: string;
+  topic: string;
+  queued: boolean;
+  daily_limit: number;
+};
+
 export type PreviewResponse = {
   drafts: Array<{
     label: string;
@@ -282,6 +337,26 @@ export async function listRooms(token: string) {
 
 export async function listRoomPosts(token: string, roomId: string) {
   return request<{ posts: Post[] }>(`/rooms/${roomId}/posts`, { token });
+}
+
+export async function createBattle(
+  token: string,
+  roomId: string,
+  payload: { topic: string; persona_a_id: string; persona_b_id: string }
+) {
+  return request<CreateBattleResponse>(`/rooms/${roomId}/battles`, {
+    method: 'POST',
+    token,
+    body: payload
+  });
+}
+
+export async function getBattle(token: string, battleId: string) {
+  return request<BattleResponse>(`/battles/${battleId}`, { token });
+}
+
+export async function getPublicBattle(battleId: string) {
+  return request<BattleResponse>(`/b/${battleId}`);
 }
 
 export async function createDraft(token: string, roomId: string, personaId: string) {

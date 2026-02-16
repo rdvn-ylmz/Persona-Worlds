@@ -90,6 +90,105 @@ func (c *OpenAIClient) SummarizePersonaActivity(ctx context.Context, persona Per
 	return c.chat(ctx, system, user)
 }
 
+func (c *OpenAIClient) GenerateBattleTurn(ctx context.Context, input BattleTurnInput) (BattleTurnOutput, error) {
+	historyLines := make([]string, 0, len(input.History))
+	for _, turn := range input.History {
+		historyLines = append(historyLines, fmt.Sprintf(
+			"Turn %d | %s | %s | Claim: %s | Evidence: %s",
+			turn.TurnIndex,
+			turn.PersonaName,
+			turn.Side,
+			turn.Claim,
+			turn.Evidence,
+		))
+	}
+	if len(historyLines) == 0 {
+		historyLines = append(historyLines, "No previous turns")
+	}
+
+	system := "You write one concise debate turn in strict JSON."
+	user := fmt.Sprintf(
+		"Topic: %s\nTurn index: %d\nPersona name: %s\nPersona bio: %s\nPersona tone: %s\nOpponent: %s\nSide: %s\nPrior turns: %s\nOutput JSON rules: return exactly one object with keys claim and evidence. claim must be one sentence. evidence must be one sentence with concrete support. No markdown or extra keys.",
+		input.Topic,
+		input.TurnIndex,
+		input.Persona.Name,
+		input.Persona.Bio,
+		input.Persona.Tone,
+		input.Opponent.Name,
+		strings.ToUpper(strings.TrimSpace(input.Side)),
+		strings.Join(historyLines, "\n- "),
+	)
+
+	raw, err := c.chat(ctx, system, user)
+	if err != nil {
+		return BattleTurnOutput{}, err
+	}
+
+	var out BattleTurnOutput
+	if err := parseJSONObject(raw, &out); err != nil {
+		return BattleTurnOutput{}, err
+	}
+	out.Claim = strings.TrimSpace(out.Claim)
+	out.Evidence = strings.TrimSpace(out.Evidence)
+	if out.Claim == "" || out.Evidence == "" {
+		return BattleTurnOutput{}, errors.New("openai provider returned invalid battle turn")
+	}
+	return out, nil
+}
+
+func (c *OpenAIClient) GenerateBattleVerdict(ctx context.Context, input BattleVerdictInput) (BattleVerdict, error) {
+	turnLines := make([]string, 0, len(input.Turns))
+	for _, turn := range input.Turns {
+		turnLines = append(turnLines, fmt.Sprintf(
+			"Turn %d | %s | %s | Claim: %s | Evidence: %s",
+			turn.TurnIndex,
+			turn.PersonaName,
+			turn.Side,
+			turn.Claim,
+			turn.Evidence,
+		))
+	}
+	if len(turnLines) == 0 {
+		turnLines = append(turnLines, "No turns")
+	}
+
+	system := "You judge a short debate and respond in strict JSON."
+	user := fmt.Sprintf(
+		"Topic: %s\nPersona A: %s\nPersona B: %s\nTurns: %s\nOutput JSON rules: return exactly one object with keys verdict (string) and takeaways (array of exactly 3 short strings). No markdown, no extra keys.",
+		input.Topic,
+		input.PersonaA.Name,
+		input.PersonaB.Name,
+		strings.Join(turnLines, "\n- "),
+	)
+
+	raw, err := c.chat(ctx, system, user)
+	if err != nil {
+		return BattleVerdict{}, err
+	}
+
+	var out BattleVerdict
+	if err := parseJSONObject(raw, &out); err != nil {
+		return BattleVerdict{}, err
+	}
+	out.Verdict = strings.TrimSpace(out.Verdict)
+	cleanTakeaways := make([]string, 0, 3)
+	for _, takeaway := range out.Takeaways {
+		trimmed := strings.TrimSpace(takeaway)
+		if trimmed == "" {
+			continue
+		}
+		cleanTakeaways = append(cleanTakeaways, trimmed)
+		if len(cleanTakeaways) == 3 {
+			break
+		}
+	}
+	out.Takeaways = cleanTakeaways
+	if out.Verdict == "" || len(out.Takeaways) == 0 {
+		return BattleVerdict{}, errors.New("openai provider returned invalid battle verdict")
+	}
+	return out, nil
+}
+
 func (c *OpenAIClient) endpoint() string {
 	if strings.HasSuffix(c.baseURL, "/v1") {
 		return c.baseURL + "/chat/completions"
@@ -159,4 +258,27 @@ func formatStringList(items []string) string {
 		return "none"
 	}
 	return strings.Join(items, " | ")
+}
+
+func parseJSONObject(raw string, dst any) error {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return errors.New("empty model response")
+	}
+
+	if err := json.Unmarshal([]byte(trimmed), dst); err == nil {
+		return nil
+	}
+
+	start := strings.Index(trimmed, "{")
+	end := strings.LastIndex(trimmed, "}")
+	if start == -1 || end <= start {
+		return errors.New("model response did not contain json object")
+	}
+
+	candidate := trimmed[start : end+1]
+	if err := json.Unmarshal([]byte(candidate), dst); err != nil {
+		return err
+	}
+	return nil
 }

@@ -99,3 +99,57 @@ func (m *MockClient) SummarizePersonaActivity(_ context.Context, persona Persona
 
 	return fmt.Sprintf("Today the persona produced %d posts and %d replies. The most active threads were: %s.", stats.Posts, stats.Replies, threadSummary), nil
 }
+
+func (m *MockClient) GenerateBattleTurn(_ context.Context, input BattleTurnInput) (BattleTurnOutput, error) {
+	side := strings.ToUpper(strings.TrimSpace(input.Side))
+	if side != "FOR" {
+		side = "AGAINST"
+	}
+
+	previous := "opening point"
+	if len(input.History) > 0 {
+		last := input.History[len(input.History)-1]
+		if strings.TrimSpace(last.Claim) != "" {
+			previous = last.Claim
+		}
+	}
+
+	claim := fmt.Sprintf(
+		"%s (%s) argues %s the motion by centering %s and directly addressing %s.",
+		input.Persona.Name,
+		input.Persona.Tone,
+		strings.ToLower(side),
+		input.Topic,
+		previous,
+	)
+
+	evidence := fmt.Sprintf(
+		"%s cites practical experiments from %s and user feedback loops to support this position.",
+		input.Persona.Name,
+		input.Persona.Bio,
+	)
+
+	return BattleTurnOutput{
+		Claim:    claim,
+		Evidence: evidence,
+	}, nil
+}
+
+func (m *MockClient) GenerateBattleVerdict(_ context.Context, input BattleVerdictInput) (BattleVerdict, error) {
+	turnCount := len(input.Turns)
+	verdict := fmt.Sprintf(
+		"Verdict: %s had a slight edge because the arguments stayed more concrete on %s across %d turns.",
+		input.PersonaA.Name,
+		input.Topic,
+		turnCount,
+	)
+
+	return BattleVerdict{
+		Verdict: verdict,
+		Takeaways: []string{
+			fmt.Sprintf("Specific claims outperformed generic framing in the %s debate.", input.Topic),
+			fmt.Sprintf("%s and %s both improved when they cited concrete examples.", input.PersonaA.Name, input.PersonaB.Name),
+			"Alternating concise turns kept the thread easy to follow and share.",
+		},
+	}, nil
+}

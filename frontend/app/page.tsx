@@ -1,6 +1,7 @@
 'use client';
 
 import { FormEvent, useEffect, useMemo, useState } from 'react';
+import { useRouter } from 'next/navigation';
 import {
   DigestThread,
   Persona,
@@ -11,6 +12,7 @@ import {
   Room,
   ThreadResponse,
   approvePost,
+  createBattle,
   createDraft,
   createPersona,
   generateReplies,
@@ -44,6 +46,7 @@ function parseLines(value: string) {
 }
 
 export default function HomePage() {
+  const router = useRouter();
   const [token, setToken] = useState<string>('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -80,6 +83,11 @@ export default function HomePage() {
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
+
+  const [battleModalOpen, setBattleModalOpen] = useState(false);
+  const [battleTopic, setBattleTopic] = useState('');
+  const [battlePersonaAId, setBattlePersonaAId] = useState('');
+  const [battlePersonaBId, setBattlePersonaBId] = useState('');
 
   const selectedRoom = useMemo(() => rooms.find((r) => r.id === selectedRoomId), [rooms, selectedRoomId]);
   const selectedPersona = useMemo(() => personas.find((p) => p.id === selectedPersonaId), [personas, selectedPersonaId]);
@@ -142,6 +150,36 @@ export default function HomePage() {
     setPreviewDrafts([]);
     setPreviewQuota(null);
   }, [selectedPersonaId, selectedRoomId]);
+
+  useEffect(() => {
+    if (!battleModalOpen) {
+      return;
+    }
+
+    const preferredA = battlePersonaAId || selectedPersonaId || personas[0]?.id || '';
+    if (!battlePersonaAId && preferredA) {
+      setBattlePersonaAId(preferredA);
+    }
+
+    if ((!battlePersonaBId || battlePersonaBId === preferredA) && personas.length > 1) {
+      const fallbackB = personas.find((persona) => persona.id !== preferredA)?.id || '';
+      if (fallbackB) {
+        setBattlePersonaBId(fallbackB);
+      }
+    }
+
+    if (!battleTopic.trim() && selectedRoom?.name) {
+      setBattleTopic(`Should teams prioritize speed over certainty in ${selectedRoom.name}?`);
+    }
+  }, [
+    battleModalOpen,
+    battlePersonaAId,
+    battlePersonaBId,
+    battleTopic,
+    personas,
+    selectedPersonaId,
+    selectedRoom
+  ]);
 
   async function refreshCoreData(authToken: string) {
     try {
@@ -466,6 +504,63 @@ export default function HomePage() {
     }
   }
 
+  function onOpenBattleModal() {
+    if (!selectedRoomId) {
+      setError('select a room first');
+      return;
+    }
+    if (personas.length < 2) {
+      setError('create at least two personas to start a battle');
+      return;
+    }
+    setError('');
+    setMessage('');
+    setBattleModalOpen(true);
+  }
+
+  function onCloseBattleModal() {
+    setBattleModalOpen(false);
+  }
+
+  async function onStartBattle(event: FormEvent) {
+    event.preventDefault();
+    if (!token || !selectedRoomId) {
+      setError('select a room and log in first');
+      return;
+    }
+
+    const topic = battleTopic.trim();
+    if (!topic) {
+      setError('topic is required');
+      return;
+    }
+    if (!battlePersonaAId || !battlePersonaBId) {
+      setError('choose two personas');
+      return;
+    }
+    if (battlePersonaAId === battlePersonaBId) {
+      setError('choose two different personas');
+      return;
+    }
+
+    try {
+      setLoading(true);
+      setError('');
+      const created = await createBattle(token, selectedRoomId, {
+        topic,
+        persona_a_id: battlePersonaAId,
+        persona_b_id: battlePersonaBId
+      });
+      setBattleModalOpen(false);
+      setMessage('Battle queued. Opening thread...');
+      router.push(`/battle/${created.battle_id}`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'could not start battle');
+    } finally {
+      setLoading(false);
+    }
+  }
+
   if (!token) {
     return (
       <main className="container">
@@ -694,7 +789,12 @@ export default function HomePage() {
         </aside>
 
         <section className="panel stack">
-          <h2>Rooms</h2>
+          <div className="section-head">
+            <h2>Rooms</h2>
+            <button className="secondary" onClick={onOpenBattleModal} disabled={loading || personas.length < 2}>
+              Start Battle
+            </button>
+          </div>
           <div className="room-list">
             {rooms.map((room) => (
               <button
@@ -781,6 +881,72 @@ export default function HomePage() {
           </div>
         </section>
       </section>
+
+      {battleModalOpen && (
+        <div className="modal-backdrop" onClick={onCloseBattleModal}>
+          <section
+            className="panel modal-card stack"
+            onClick={(event) => {
+              event.stopPropagation();
+            }}
+          >
+            <div className="section-head">
+              <h2>Start Persona Battle</h2>
+              <button className="secondary modal-close" type="button" onClick={onCloseBattleModal}>
+                Close
+              </button>
+            </div>
+
+            <form className="stack" onSubmit={onStartBattle}>
+              <label>
+                Topic
+                <textarea
+                  value={battleTopic}
+                  onChange={(event) => setBattleTopic(event.target.value)}
+                  placeholder="What should these personas debate?"
+                  maxLength={240}
+                  rows={3}
+                />
+              </label>
+
+              <label>
+                Persona A (FOR)
+                <select value={battlePersonaAId} onChange={(event) => setBattlePersonaAId(event.target.value)} required>
+                  <option value="">Select persona</option>
+                  {personas.map((persona) => (
+                    <option key={`battle-a-${persona.id}`} value={persona.id}>
+                      {persona.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <label>
+                Persona B (AGAINST)
+                <select value={battlePersonaBId} onChange={(event) => setBattlePersonaBId(event.target.value)} required>
+                  <option value="">Select persona</option>
+                  {personas
+                    .filter((persona) => persona.id !== battlePersonaAId)
+                    .map((persona) => (
+                      <option key={`battle-b-${persona.id}`} value={persona.id}>
+                        {persona.name}
+                      </option>
+                    ))}
+                </select>
+              </label>
+
+              <div className="row">
+                <button type="submit" disabled={loading}>
+                  Start Battle
+                </button>
+                <button className="secondary" type="button" onClick={onCloseBattleModal} disabled={loading}>
+                  Cancel
+                </button>
+              </div>
+            </form>
+          </section>
+        </div>
+      )}
 
       {(loading || message || error) && (
         <footer className="panel status-bar">

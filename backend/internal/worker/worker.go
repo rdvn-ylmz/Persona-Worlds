@@ -43,9 +43,30 @@ type digestStats struct {
 	TopThreads []digestThread `json:"top_threads"`
 }
 
+type generatedBattleTurn struct {
+	TurnIndex   int
+	PersonaID   string
+	PersonaName string
+	Side        string
+	Claim       string
+	Evidence    string
+	Content     string
+}
+
+type storedBattleVerdict struct {
+	Verdict   string   `json:"verdict"`
+	Takeaways []string `json:"takeaways"`
+}
+
 type dbExecutor interface {
 	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
 }
+
+const (
+	battleTurnCount     = 6
+	battleTurnWordLimit = 120
+	battleVerdictWords  = 80
+)
 
 func (e permanentError) Error() string {
 	return e.message
@@ -62,6 +83,10 @@ func (w *Worker) Run(ctx context.Context) {
 	for {
 		if err := w.generateDigestForOnePersona(ctx); err != nil {
 			log.Printf("worker digest process error: %v", err)
+		}
+
+		if err := w.generateBattleForOnePending(ctx); err != nil {
+			log.Printf("worker battle process error: %v", err)
 		}
 
 		if err := w.processOne(ctx); err != nil {
@@ -129,6 +154,283 @@ func (w *Worker) processOne(ctx context.Context) error {
 	}
 
 	return w.markJobFailed(ctx, jobID, err)
+}
+
+func (w *Worker) generateBattleForOnePending(ctx context.Context) error {
+	tx, err := w.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	var battleID string
+	err = tx.QueryRow(ctx, `
+		SELECT id::text
+		FROM battles
+		WHERE status = 'PENDING'
+		ORDER BY created_at ASC
+		LIMIT 1
+		FOR UPDATE SKIP LOCKED
+	`).Scan(&battleID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		return err
+	}
+
+	if _, err := tx.Exec(ctx, `
+		UPDATE battles
+		SET status='PROCESSING', error='', updated_at=NOW()
+		WHERE id = $1
+	`, battleID); err != nil {
+		return err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+
+	if err := w.executeGenerateBattle(ctx, battleID); err != nil {
+		return w.markBattleFailed(ctx, battleID, err)
+	}
+	return w.markBattleDone(ctx, battleID)
+}
+
+func (w *Worker) executeGenerateBattle(ctx context.Context, battleID string) error {
+	var battle struct {
+		Topic string
+
+		PersonaAID                string
+		PersonaAName              string
+		PersonaABio               string
+		PersonaATone              string
+		PersonaAWritingSamplesRaw []byte
+		PersonaADoNotSayRaw       []byte
+		PersonaACatchphrasesRaw   []byte
+		PersonaALanguage          string
+		PersonaAFormality         int
+
+		PersonaBID                string
+		PersonaBName              string
+		PersonaBBio               string
+		PersonaBTone              string
+		PersonaBWritingSamplesRaw []byte
+		PersonaBDoNotSayRaw       []byte
+		PersonaBCatchphrasesRaw   []byte
+		PersonaBLanguage          string
+		PersonaBFormality         int
+	}
+
+	err := w.db.QueryRow(ctx, `
+		SELECT
+			b.topic,
+			pa.id::text,
+			pa.name,
+			pa.bio,
+			pa.tone,
+			pa.writing_samples,
+			pa.do_not_say,
+			pa.catchphrases,
+			pa.preferred_language,
+			pa.formality,
+			pb.id::text,
+			pb.name,
+			pb.bio,
+			pb.tone,
+			pb.writing_samples,
+			pb.do_not_say,
+			pb.catchphrases,
+			pb.preferred_language,
+			pb.formality
+		FROM battles b
+		JOIN personas pa ON pa.id = b.persona_a_id
+		JOIN personas pb ON pb.id = b.persona_b_id
+		WHERE b.id = $1
+	`, battleID).Scan(
+		&battle.Topic,
+		&battle.PersonaAID,
+		&battle.PersonaAName,
+		&battle.PersonaABio,
+		&battle.PersonaATone,
+		&battle.PersonaAWritingSamplesRaw,
+		&battle.PersonaADoNotSayRaw,
+		&battle.PersonaACatchphrasesRaw,
+		&battle.PersonaALanguage,
+		&battle.PersonaAFormality,
+		&battle.PersonaBID,
+		&battle.PersonaBName,
+		&battle.PersonaBBio,
+		&battle.PersonaBTone,
+		&battle.PersonaBWritingSamplesRaw,
+		&battle.PersonaBDoNotSayRaw,
+		&battle.PersonaBCatchphrasesRaw,
+		&battle.PersonaBLanguage,
+		&battle.PersonaBFormality,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return permanentError{message: "battle not found"}
+		}
+		return err
+	}
+
+	topic := strings.TrimSpace(battle.Topic)
+	if err := safety.ValidateContent(topic, 240); err != nil {
+		return permanentError{message: "battle topic failed safety validation"}
+	}
+
+	personaA := ai.PersonaContext{
+		ID:                battle.PersonaAID,
+		Name:              battle.PersonaAName,
+		Bio:               battle.PersonaABio,
+		Tone:              battle.PersonaATone,
+		WritingSamples:    parseJSONStringSlice(battle.PersonaAWritingSamplesRaw),
+		DoNotSay:          parseJSONStringSlice(battle.PersonaADoNotSayRaw),
+		Catchphrases:      parseJSONStringSlice(battle.PersonaACatchphrasesRaw),
+		PreferredLanguage: strings.TrimSpace(battle.PersonaALanguage),
+		Formality:         battle.PersonaAFormality,
+	}
+	if personaA.PreferredLanguage == "" {
+		personaA.PreferredLanguage = "en"
+	}
+
+	personaB := ai.PersonaContext{
+		ID:                battle.PersonaBID,
+		Name:              battle.PersonaBName,
+		Bio:               battle.PersonaBBio,
+		Tone:              battle.PersonaBTone,
+		WritingSamples:    parseJSONStringSlice(battle.PersonaBWritingSamplesRaw),
+		DoNotSay:          parseJSONStringSlice(battle.PersonaBDoNotSayRaw),
+		Catchphrases:      parseJSONStringSlice(battle.PersonaBCatchphrasesRaw),
+		PreferredLanguage: strings.TrimSpace(battle.PersonaBLanguage),
+		Formality:         battle.PersonaBFormality,
+	}
+	if personaB.PreferredLanguage == "" {
+		personaB.PreferredLanguage = "en"
+	}
+
+	history := make([]ai.BattleTurnContext, 0, battleTurnCount)
+	turns := make([]generatedBattleTurn, 0, battleTurnCount)
+
+	for i := 0; i < battleTurnCount; i++ {
+		turnIndex := i + 1
+		active := personaA
+		opponent := personaB
+		side := "FOR"
+		if i%2 == 1 {
+			active = personaB
+			opponent = personaA
+			side = "AGAINST"
+		}
+
+		generated, err := w.llm.GenerateBattleTurn(ctx, ai.BattleTurnInput{
+			Topic:     topic,
+			Persona:   active,
+			Opponent:  opponent,
+			Side:      side,
+			TurnIndex: turnIndex,
+			History:   history,
+		})
+		if err != nil {
+			return err
+		}
+
+		claim := strings.TrimSpace(generated.Claim)
+		evidence := strings.TrimSpace(generated.Evidence)
+		if claim == "" || evidence == "" {
+			return permanentError{message: "battle turn generation returned empty claim or evidence"}
+		}
+
+		content := formatBattleTurnContent(claim, evidence, battleTurnWordLimit)
+		if err := safety.ValidateContent(content, 1200); err != nil {
+			return permanentError{message: err.Error()}
+		}
+
+		turn := generatedBattleTurn{
+			TurnIndex:   turnIndex,
+			PersonaID:   active.ID,
+			PersonaName: active.Name,
+			Side:        side,
+			Claim:       claim,
+			Evidence:    evidence,
+			Content:     content,
+		}
+		turns = append(turns, turn)
+
+		history = append(history, ai.BattleTurnContext{
+			TurnIndex:   turnIndex,
+			PersonaName: active.Name,
+			Side:        side,
+			Claim:       claim,
+			Evidence:    evidence,
+		})
+	}
+
+	verdictOut, err := w.llm.GenerateBattleVerdict(ctx, ai.BattleVerdictInput{
+		Topic:    topic,
+		PersonaA: personaA,
+		PersonaB: personaB,
+		Turns:    history,
+	})
+	if err != nil {
+		return err
+	}
+
+	verdictText := truncateWords(strings.TrimSpace(verdictOut.Verdict), battleVerdictWords)
+	if verdictText == "" {
+		return permanentError{message: "battle verdict generation returned empty verdict"}
+	}
+	if err := safety.ValidateContent(verdictText, 600); err != nil {
+		return permanentError{message: err.Error()}
+	}
+
+	takeaways := normalizeTakeaways(verdictOut.Takeaways, topic, personaA.Name, personaB.Name)
+	for _, takeaway := range takeaways {
+		if err := safety.ValidateContent(takeaway, 260); err != nil {
+			return permanentError{message: err.Error()}
+		}
+	}
+
+	verdictPayload, err := json.Marshal(storedBattleVerdict{
+		Verdict:   verdictText,
+		Takeaways: takeaways,
+	})
+	if err != nil {
+		return err
+	}
+
+	tx, err := w.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	if _, err := tx.Exec(ctx, `
+		DELETE FROM battle_turns
+		WHERE battle_id = $1
+	`, battleID); err != nil {
+		return err
+	}
+
+	for _, turn := range turns {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO battle_turns(battle_id, turn_index, persona_id, content)
+			VALUES ($1, $2, $3, $4)
+		`, battleID, turn.TurnIndex, turn.PersonaID, turn.Content); err != nil {
+			return err
+		}
+	}
+
+	if _, err := tx.Exec(ctx, `
+		UPDATE battles
+		SET verdict = $2::jsonb, updated_at = NOW()
+		WHERE id = $1
+	`, battleID, verdictPayload); err != nil {
+		return err
+	}
+
+	return tx.Commit(ctx)
 }
 
 func (w *Worker) executeGenerateReply(ctx context.Context, postID, personaID string) error {
@@ -529,6 +831,111 @@ func truncatePreview(value string, maxRunes int) string {
 		return trimmed
 	}
 	return strings.TrimSpace(string(runes[:maxRunes]))
+}
+
+func formatBattleTurnContent(claim, evidence string, maxWords int) string {
+	normalizedClaim := strings.TrimSpace(claim)
+	normalizedEvidence := strings.TrimSpace(evidence)
+	if maxWords <= 2 {
+		return fmt.Sprintf("Claim: %s\nEvidence: %s", normalizedClaim, normalizedEvidence)
+	}
+
+	usableWords := maxWords - 2 // Claim: and Evidence:
+	claimWords := usableWords / 2
+	if claimWords < 8 {
+		claimWords = 8
+	}
+	if claimWords > usableWords-1 {
+		claimWords = usableWords - 1
+	}
+	evidenceWords := usableWords - claimWords
+	if evidenceWords < 1 {
+		evidenceWords = 1
+	}
+
+	normalizedClaim = truncateWords(normalizedClaim, claimWords)
+	normalizedEvidence = truncateWords(normalizedEvidence, evidenceWords)
+	return fmt.Sprintf("Claim: %s\nEvidence: %s", normalizedClaim, normalizedEvidence)
+}
+
+func truncateWords(value string, maxWords int) string {
+	trimmed := strings.TrimSpace(value)
+	if maxWords <= 0 || trimmed == "" {
+		return ""
+	}
+
+	words := strings.Fields(trimmed)
+	if len(words) <= maxWords {
+		return strings.Join(words, " ")
+	}
+	return strings.Join(words[:maxWords], " ")
+}
+
+func normalizeTakeaways(raw []string, topic, personaAName, personaBName string) []string {
+	cleaned := make([]string, 0, 3)
+	seen := map[string]struct{}{}
+	for _, item := range raw {
+		trimmed := truncateWords(strings.TrimSpace(item), 24)
+		if trimmed == "" {
+			continue
+		}
+		key := strings.ToLower(trimmed)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		cleaned = append(cleaned, trimmed)
+		if len(cleaned) == 3 {
+			break
+		}
+	}
+
+	fallback := []string{
+		fmt.Sprintf("Concrete evidence changed the quality of the %s debate.", topic),
+		fmt.Sprintf("%s and %s benefited from concise claim framing.", personaAName, personaBName),
+		"Short alternating turns made the discussion easier to follow.",
+	}
+	for _, item := range fallback {
+		if len(cleaned) == 3 {
+			break
+		}
+		trimmed := truncateWords(strings.TrimSpace(item), 24)
+		if trimmed == "" {
+			continue
+		}
+		key := strings.ToLower(trimmed)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		cleaned = append(cleaned, trimmed)
+	}
+	return cleaned
+}
+
+func (w *Worker) markBattleDone(ctx context.Context, battleID string) error {
+	_, err := w.db.Exec(ctx, `
+		UPDATE battles
+		SET status='DONE', error='', updated_at=NOW()
+		WHERE id = $1
+	`, battleID)
+	if err == nil {
+		log.Printf("battle %s completed", battleID)
+	}
+	return err
+}
+
+func (w *Worker) markBattleFailed(ctx context.Context, battleID string, failure error) error {
+	errorText := truncatePreview(failure.Error(), 500)
+	_, err := w.db.Exec(ctx, `
+		UPDATE battles
+		SET status='FAILED', error=$2, updated_at=NOW()
+		WHERE id = $1
+	`, battleID, errorText)
+	if err == nil {
+		log.Printf("battle %s failed: %s", battleID, errorText)
+	}
+	return err
 }
 
 func (w *Worker) markJobDone(ctx context.Context, jobID int64) error {
