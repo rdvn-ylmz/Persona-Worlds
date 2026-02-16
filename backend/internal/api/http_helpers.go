@@ -5,6 +5,8 @@ import (
 	"errors"
 	"io"
 	"net/http"
+
+	"personaworlds/backend/internal/auth"
 )
 
 func decodeJSON(r *http.Request, dst any) error {
@@ -43,4 +45,45 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 
 func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]any{"error": message})
+}
+
+func writeBadRequest(w http.ResponseWriter, message string) {
+	writeError(w, http.StatusBadRequest, message)
+}
+
+func writeUnauthorized(w http.ResponseWriter, message string) {
+	writeError(w, http.StatusUnauthorized, message)
+}
+
+func writeForbidden(w http.ResponseWriter, message string) {
+	writeError(w, http.StatusForbidden, message)
+}
+
+func writeNotFound(w http.ResponseWriter, message string) {
+	writeError(w, http.StatusNotFound, message)
+}
+
+func writeConflict(w http.ResponseWriter, message string) {
+	writeError(w, http.StatusConflict, message)
+}
+
+func writeTooManyRequests(w http.ResponseWriter, message string) {
+	writeError(w, http.StatusTooManyRequests, message)
+}
+
+func writeBadGateway(w http.ResponseWriter, message string) {
+	writeError(w, http.StatusBadGateway, message)
+}
+
+func writeInternalError(w http.ResponseWriter, message string) {
+	writeError(w, http.StatusInternalServerError, message)
+}
+
+func (s *Server) requireUserID(w http.ResponseWriter, r *http.Request) (string, bool) {
+	userID, ok := auth.UserIDFromContext(r.Context())
+	if !ok {
+		writeUnauthorized(w, "missing user")
+		return "", false
+	}
+	return userID, true
 }

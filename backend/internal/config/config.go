@@ -26,11 +26,6 @@ type Config struct {
 }
 
 func Load() Config {
-	pollEvery, err := time.ParseDuration(getEnv("WORKER_POLL_EVERY", "3s"))
-	if err != nil {
-		pollEvery = 3 * time.Second
-	}
-
 	return Config{
 		Port:                getEnv("PORT", "8080"),
 		DatabaseURL:         getEnv("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/personaworlds?sslmode=disable"),
@@ -47,7 +42,7 @@ func Load() Config {
 		DefaultReplyQuota:   getEnvInt("DEFAULT_REPLY_QUOTA", 25),
 		DefaultPreviewQuota: getEnvInt("DEFAULT_PREVIEW_QUOTA", 5),
 		FrontendOrigin:      getEnv("FRONTEND_ORIGIN", "http://localhost:3000"),
-		WorkerPollEvery:     pollEvery,
+		WorkerPollEvery:     getEnvDuration("WORKER_POLL_EVERY", 3*time.Second),
 	}
 }
 
@@ -64,6 +59,18 @@ func getEnvInt(key string, fallback int) int {
 		return fallback
 	}
 	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
+func getEnvDuration(key string, fallback time.Duration) time.Duration {
+	value := os.Getenv(key)
+	if value == "" {
+		return fallback
+	}
+	parsed, err := time.ParseDuration(value)
 	if err != nil {
 		return fallback
 	}

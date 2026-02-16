@@ -1,7 +1,6 @@
 package api
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -203,7 +202,7 @@ func (s *Server) publicReadRateLimitMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		clientIP := requestClientIP(r)
 		if !s.publicReadLimiter.allow(clientIP, time.Now()) {
-			writeError(w, http.StatusTooManyRequests, "public profile rate limit exceeded")
+			writeTooManyRequests(w, "public profile rate limit exceeded")
 			return
 		}
 		next.ServeHTTP(w, r)
@@ -214,7 +213,7 @@ func (s *Server) publicWriteRateLimitMiddleware(next http.Handler) http.Handler 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		clientIP := requestClientIP(r)
 		if !s.publicWriteLimiter.allow(clientIP, time.Now()) {
-			writeError(w, http.StatusTooManyRequests, "follow rate limit exceeded")
+			writeTooManyRequests(w, "follow rate limit exceeded")
 			return
 		}
 		next.ServeHTTP(w, r)
@@ -292,19 +291,19 @@ func (s *Server) handleSignup(w http.ResponseWriter, r *http.Request) {
 		Password string `json:"password"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeBadRequest(w, err.Error())
 		return
 	}
 
 	req.Email = strings.TrimSpace(strings.ToLower(req.Email))
 	if !strings.Contains(req.Email, "@") || len(req.Password) < 8 {
-		writeError(w, http.StatusBadRequest, "invalid email or password")
+		writeBadRequest(w, "invalid email or password")
 		return
 	}
 
 	hash, err := auth.HashPassword(req.Password)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not hash password")
+		writeInternalError(w, "could not hash password")
 		return
 	}
 
@@ -317,16 +316,16 @@ func (s *Server) handleSignup(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
-			writeError(w, http.StatusConflict, "email already registered")
+			writeConflict(w, "email already registered")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "could not create user")
+		writeInternalError(w, "could not create user")
 		return
 	}
 
 	token, err := auth.CreateToken(s.cfg.JWTSecret, userID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not create token")
+		writeInternalError(w, "could not create token")
 		return
 	}
 
@@ -339,7 +338,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Password string `json:"password"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeBadRequest(w, err.Error())
 		return
 	}
 
@@ -353,21 +352,21 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	`, req.Email).Scan(&userID, &hash)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			writeError(w, http.StatusUnauthorized, "invalid credentials")
+			writeUnauthorized(w, "invalid credentials")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "could not query user")
+		writeInternalError(w, "could not query user")
 		return
 	}
 
 	if !auth.VerifyPassword(hash, req.Password) {
-		writeError(w, http.StatusUnauthorized, "invalid credentials")
+		writeUnauthorized(w, "invalid credentials")
 		return
 	}
 
 	token, err := auth.CreateToken(s.cfg.JWTSecret, userID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not create token")
+		writeInternalError(w, "could not create token")
 		return
 	}
 
@@ -377,29 +376,29 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleGetPublicProfile(w http.ResponseWriter, r *http.Request) {
 	slug := normalizePublicSlug(chi.URLParam(r, "slug"))
 	if slug == "" {
-		writeError(w, http.StatusNotFound, "public profile not found")
+		writeNotFound(w, "public profile not found")
 		return
 	}
 
 	profile, _, err := s.getPublicProfileBySlug(r.Context(), slug)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "public profile not found")
+			writeNotFound(w, "public profile not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "could not load public profile")
+		writeInternalError(w, "could not load public profile")
 		return
 	}
 
 	latestPosts, nextCursor, err := s.listPublishedPostsForPersona(r.Context(), profile.PersonaID, "", 10)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not load public posts")
+		writeInternalError(w, "could not load public posts")
 		return
 	}
 
 	topRooms, err := s.listTopRoomsForPersona(r.Context(), profile.PersonaID, 3)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not load top rooms")
+		writeInternalError(w, "could not load top rooms")
 		return
 	}
 
@@ -414,24 +413,24 @@ func (s *Server) handleGetPublicProfile(w http.ResponseWriter, r *http.Request) 
 func (s *Server) handleGetPublicProfilePosts(w http.ResponseWriter, r *http.Request) {
 	slug := normalizePublicSlug(chi.URLParam(r, "slug"))
 	if slug == "" {
-		writeError(w, http.StatusNotFound, "public profile not found")
+		writeNotFound(w, "public profile not found")
 		return
 	}
 
 	profile, _, err := s.getPublicProfileBySlug(r.Context(), slug)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "public profile not found")
+			writeNotFound(w, "public profile not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "could not load public profile")
+		writeInternalError(w, "could not load public profile")
 		return
 	}
 
 	cursor := strings.TrimSpace(r.URL.Query().Get("cursor"))
 	posts, nextCursor, err := s.listPublishedPostsForPersona(r.Context(), profile.PersonaID, cursor, 10)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeBadRequest(w, err.Error())
 		return
 	}
 
@@ -444,17 +443,17 @@ func (s *Server) handleGetPublicProfilePosts(w http.ResponseWriter, r *http.Requ
 func (s *Server) handleFollowPublicProfile(w http.ResponseWriter, r *http.Request) {
 	slug := normalizePublicSlug(chi.URLParam(r, "slug"))
 	if slug == "" {
-		writeError(w, http.StatusNotFound, "public profile not found")
+		writeNotFound(w, "public profile not found")
 		return
 	}
 
 	profile, ownerUserID, err := s.getPublicProfileBySlug(r.Context(), slug)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "public profile not found")
+			writeNotFound(w, "public profile not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "could not load public profile")
+		writeInternalError(w, "could not load public profile")
 		return
 	}
 
@@ -467,7 +466,7 @@ func (s *Server) handleFollowPublicProfile(w http.ResponseWriter, r *http.Reques
 	}
 
 	if followerUserID == ownerUserID {
-		writeError(w, http.StatusConflict, "cannot follow your own persona")
+		writeConflict(w, "cannot follow your own persona")
 		return
 	}
 
@@ -477,7 +476,7 @@ func (s *Server) handleFollowPublicProfile(w http.ResponseWriter, r *http.Reques
 		ON CONFLICT (follower_user_id, followed_persona_id) DO NOTHING
 	`, followerUserID, profile.PersonaID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not follow persona")
+		writeInternalError(w, "could not follow persona")
 		return
 	}
 
@@ -487,7 +486,7 @@ func (s *Server) handleFollowPublicProfile(w http.ResponseWriter, r *http.Reques
 		FROM persona_follows
 		WHERE followed_persona_id = $1
 	`, profile.PersonaID).Scan(&followers); err != nil {
-		writeError(w, http.StatusInternalServerError, "could not load followers")
+		writeInternalError(w, "could not load followers")
 		return
 	}
 
@@ -498,9 +497,8 @@ func (s *Server) handleFollowPublicProfile(w http.ResponseWriter, r *http.Reques
 }
 
 func (s *Server) handlePublishPersonaProfile(w http.ResponseWriter, r *http.Request) {
-	userID, ok := auth.UserIDFromContext(r.Context())
+	userID, ok := s.requireUserID(w, r)
 	if !ok {
-		writeError(w, http.StatusUnauthorized, "missing user")
 		return
 	}
 
@@ -510,7 +508,7 @@ func (s *Server) handlePublishPersonaProfile(w http.ResponseWriter, r *http.Requ
 		Bio  string `json:"bio"`
 	}
 	if err := decodeJSONAllowEmpty(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeBadRequest(w, err.Error())
 		return
 	}
 
@@ -525,17 +523,17 @@ func (s *Server) handlePublishPersonaProfile(w http.ResponseWriter, r *http.Requ
 	`, personaID, userID).Scan(&persona.Name, &persona.Bio)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "persona not found")
+			writeNotFound(w, "persona not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "could not load persona")
+		writeInternalError(w, "could not load persona")
 		return
 	}
 
 	requestedSlug := strings.TrimSpace(req.Slug)
 	normalizedRequestedSlug := normalizePublicSlug(requestedSlug)
 	if requestedSlug != "" && normalizedRequestedSlug == "" {
-		writeError(w, http.StatusBadRequest, "slug must contain only letters, numbers, spaces, hyphen or underscore")
+		writeBadRequest(w, "slug must contain only letters, numbers, spaces, hyphen or underscore")
 		return
 	}
 
@@ -551,7 +549,7 @@ func (s *Server) handlePublishPersonaProfile(w http.ResponseWriter, r *http.Requ
 		WHERE persona_id = $1
 	`, personaID).Scan(&currentSlug)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-		writeError(w, http.StatusInternalServerError, "could not inspect profile")
+		writeInternalError(w, "could not inspect profile")
 		return
 	}
 
@@ -567,7 +565,7 @@ func (s *Server) handlePublishPersonaProfile(w http.ResponseWriter, r *http.Requ
 
 	finalSlug, err := s.ensureUniquePublicProfileSlug(r.Context(), baseSlug, personaID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not create unique slug")
+		writeInternalError(w, "could not create unique slug")
 		return
 	}
 
@@ -590,10 +588,10 @@ func (s *Server) handlePublishPersonaProfile(w http.ResponseWriter, r *http.Requ
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
-			writeError(w, http.StatusConflict, "slug already in use")
+			writeConflict(w, "slug already in use")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "could not publish profile")
+		writeInternalError(w, "could not publish profile")
 		return
 	}
 
@@ -609,9 +607,8 @@ func (s *Server) handlePublishPersonaProfile(w http.ResponseWriter, r *http.Requ
 }
 
 func (s *Server) handleUnpublishPersonaProfile(w http.ResponseWriter, r *http.Request) {
-	userID, ok := auth.UserIDFromContext(r.Context())
+	userID, ok := s.requireUserID(w, r)
 	if !ok {
-		writeError(w, http.StatusUnauthorized, "missing user")
 		return
 	}
 	personaID := chi.URLParam(r, "id")
@@ -624,11 +621,11 @@ func (s *Server) handleUnpublishPersonaProfile(w http.ResponseWriter, r *http.Re
 			WHERE id = $1 AND user_id = $2
 		)
 	`, personaID, userID).Scan(&exists); err != nil {
-		writeError(w, http.StatusInternalServerError, "could not validate persona")
+		writeInternalError(w, "could not validate persona")
 		return
 	}
 	if !exists {
-		writeError(w, http.StatusNotFound, "persona not found")
+		writeNotFound(w, "persona not found")
 		return
 	}
 
@@ -639,7 +636,7 @@ func (s *Server) handleUnpublishPersonaProfile(w http.ResponseWriter, r *http.Re
 		WHERE persona_id = $1
 	`, personaID).Scan(&slug)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-		writeError(w, http.StatusInternalServerError, "could not load profile")
+		writeInternalError(w, "could not load profile")
 		return
 	}
 
@@ -649,7 +646,7 @@ func (s *Server) handleUnpublishPersonaProfile(w http.ResponseWriter, r *http.Re
 			SET is_public = FALSE
 			WHERE persona_id = $1
 		`, personaID); err != nil {
-			writeError(w, http.StatusInternalServerError, "could not unpublish profile")
+			writeInternalError(w, "could not unpublish profile")
 			return
 		}
 	}
@@ -667,9 +664,8 @@ func (s *Server) handleUnpublishPersonaProfile(w http.ResponseWriter, r *http.Re
 }
 
 func (s *Server) handleListPersonas(w http.ResponseWriter, r *http.Request) {
-	userID, ok := auth.UserIDFromContext(r.Context())
+	userID, ok := s.requireUserID(w, r)
 	if !ok {
-		writeError(w, http.StatusUnauthorized, "missing user")
 		return
 	}
 
@@ -680,7 +676,7 @@ func (s *Server) handleListPersonas(w http.ResponseWriter, r *http.Request) {
 		ORDER BY created_at DESC
 	`, userID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not list personas")
+		writeInternalError(w, "could not list personas")
 		return
 	}
 	defer rows.Close()
@@ -689,7 +685,7 @@ func (s *Server) handleListPersonas(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var p Persona
 		if err := scanPersona(rows, &p); err != nil {
-			writeError(w, http.StatusInternalServerError, "could not scan persona")
+			writeInternalError(w, "could not scan persona")
 			return
 		}
 		personas = append(personas, p)
@@ -699,50 +695,27 @@ func (s *Server) handleListPersonas(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCreatePersona(w http.ResponseWriter, r *http.Request) {
-	userID, ok := auth.UserIDFromContext(r.Context())
+	userID, ok := s.requireUserID(w, r)
 	if !ok {
-		writeError(w, http.StatusUnauthorized, "missing user")
 		return
 	}
 
-	var req struct {
-		Name              string   `json:"name"`
-		Bio               string   `json:"bio"`
-		Tone              string   `json:"tone"`
-		WritingSamples    []string `json:"writing_samples"`
-		DoNotSay          []string `json:"do_not_say"`
-		Catchphrases      []string `json:"catchphrases"`
-		PreferredLanguage string   `json:"preferred_language"`
-		Formality         int      `json:"formality"`
-		DailyDraftQuota   int      `json:"daily_draft_quota"`
-		DailyReplyQuota   int      `json:"daily_reply_quota"`
-	}
+	var req personaUpsertRequest
 	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeBadRequest(w, err.Error())
 		return
 	}
 
-	input, err := normalizePersonaInput(req.Name, req.Bio, req.Tone, req.WritingSamples, req.DoNotSay, req.Catchphrases, req.PreferredLanguage, req.Formality)
+	input, err := req.normalizedPersonaInput()
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeBadRequest(w, err.Error())
 		return
 	}
 
-	if input.Name == "" {
-		writeError(w, http.StatusBadRequest, "name is required")
-		return
-	}
-	if req.DailyDraftQuota <= 0 {
-		req.DailyDraftQuota = s.cfg.DefaultDraftQuota
-	}
-	if req.DailyReplyQuota <= 0 {
-		req.DailyReplyQuota = s.cfg.DefaultReplyQuota
-	}
+	req.applyDefaultQuotas(s.cfg.DefaultDraftQuota, s.cfg.DefaultReplyQuota)
 
 	var p Persona
-	writingSamplesJSON, _ := json.Marshal(input.WritingSamples)
-	doNotSayJSON, _ := json.Marshal(input.DoNotSay)
-	catchphrasesJSON, _ := json.Marshal(input.Catchphrases)
+	writingSamplesJSON, doNotSayJSON, catchphrasesJSON := marshalPersonaJSONFields(input)
 
 	err = scanPersona(s.db.QueryRow(r.Context(), `
 		INSERT INTO personas(user_id, name, bio, tone, writing_samples, do_not_say, catchphrases, preferred_language, formality, daily_draft_quota, daily_reply_quota)
@@ -750,7 +723,7 @@ func (s *Server) handleCreatePersona(w http.ResponseWriter, r *http.Request) {
 		RETURNING id::text, name, bio, tone, writing_samples, do_not_say, catchphrases, preferred_language, formality, daily_draft_quota, daily_reply_quota, created_at, updated_at
 	`, userID, input.Name, input.Bio, input.Tone, writingSamplesJSON, doNotSayJSON, catchphrasesJSON, input.PreferredLanguage, input.Formality, req.DailyDraftQuota, req.DailyReplyQuota), &p)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not create persona")
+		writeInternalError(w, "could not create persona")
 		return
 	}
 
@@ -758,9 +731,8 @@ func (s *Server) handleCreatePersona(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetPersona(w http.ResponseWriter, r *http.Request) {
-	userID, ok := auth.UserIDFromContext(r.Context())
+	userID, ok := s.requireUserID(w, r)
 	if !ok {
-		writeError(w, http.StatusUnauthorized, "missing user")
 		return
 	}
 	personaID := chi.URLParam(r, "id")
@@ -768,10 +740,10 @@ func (s *Server) handleGetPersona(w http.ResponseWriter, r *http.Request) {
 	p, err := s.getPersonaByID(r.Context(), userID, personaID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "persona not found")
+			writeNotFound(w, "persona not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "could not get persona")
+		writeInternalError(w, "could not get persona")
 		return
 	}
 
@@ -779,48 +751,30 @@ func (s *Server) handleGetPersona(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleUpdatePersona(w http.ResponseWriter, r *http.Request) {
-	userID, ok := auth.UserIDFromContext(r.Context())
+	userID, ok := s.requireUserID(w, r)
 	if !ok {
-		writeError(w, http.StatusUnauthorized, "missing user")
 		return
 	}
 	personaID := chi.URLParam(r, "id")
 
-	var req struct {
-		Name              string   `json:"name"`
-		Bio               string   `json:"bio"`
-		Tone              string   `json:"tone"`
-		WritingSamples    []string `json:"writing_samples"`
-		DoNotSay          []string `json:"do_not_say"`
-		Catchphrases      []string `json:"catchphrases"`
-		PreferredLanguage string   `json:"preferred_language"`
-		Formality         int      `json:"formality"`
-		DailyDraftQuota   int      `json:"daily_draft_quota"`
-		DailyReplyQuota   int      `json:"daily_reply_quota"`
-	}
+	var req personaUpsertRequest
 	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeBadRequest(w, err.Error())
 		return
 	}
 
-	input, err := normalizePersonaInput(req.Name, req.Bio, req.Tone, req.WritingSamples, req.DoNotSay, req.Catchphrases, req.PreferredLanguage, req.Formality)
+	input, err := req.normalizedPersonaInput()
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeBadRequest(w, err.Error())
 		return
 	}
-	if input.Name == "" {
-		writeError(w, http.StatusBadRequest, "name is required")
-		return
-	}
-	if req.DailyDraftQuota <= 0 || req.DailyReplyQuota <= 0 {
-		writeError(w, http.StatusBadRequest, "quotas must be positive")
+	if err := req.validatePositiveQuotas(); err != nil {
+		writeBadRequest(w, err.Error())
 		return
 	}
 
 	var p Persona
-	writingSamplesJSON, _ := json.Marshal(input.WritingSamples)
-	doNotSayJSON, _ := json.Marshal(input.DoNotSay)
-	catchphrasesJSON, _ := json.Marshal(input.Catchphrases)
+	writingSamplesJSON, doNotSayJSON, catchphrasesJSON := marshalPersonaJSONFields(input)
 
 	err = scanPersona(s.db.QueryRow(r.Context(), `
 		UPDATE personas
@@ -830,10 +784,10 @@ func (s *Server) handleUpdatePersona(w http.ResponseWriter, r *http.Request) {
 	`, input.Name, input.Bio, input.Tone, writingSamplesJSON, doNotSayJSON, catchphrasesJSON, input.PreferredLanguage, input.Formality, req.DailyDraftQuota, req.DailyReplyQuota, personaID, userID), &p)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "persona not found")
+			writeNotFound(w, "persona not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "could not update persona")
+		writeInternalError(w, "could not update persona")
 		return
 	}
 
@@ -841,20 +795,19 @@ func (s *Server) handleUpdatePersona(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDeletePersona(w http.ResponseWriter, r *http.Request) {
-	userID, ok := auth.UserIDFromContext(r.Context())
+	userID, ok := s.requireUserID(w, r)
 	if !ok {
-		writeError(w, http.StatusUnauthorized, "missing user")
 		return
 	}
 	personaID := chi.URLParam(r, "id")
 
 	ct, err := s.db.Exec(r.Context(), "DELETE FROM personas WHERE id=$1 AND user_id=$2", personaID, userID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not delete persona")
+		writeInternalError(w, "could not delete persona")
 		return
 	}
 	if ct.RowsAffected() == 0 {
-		writeError(w, http.StatusNotFound, "persona not found")
+		writeNotFound(w, "persona not found")
 		return
 	}
 
@@ -862,46 +815,45 @@ func (s *Server) handleDeletePersona(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handlePreviewPersona(w http.ResponseWriter, r *http.Request) {
-	userID, ok := auth.UserIDFromContext(r.Context())
+	userID, ok := s.requireUserID(w, r)
 	if !ok {
-		writeError(w, http.StatusUnauthorized, "missing user")
 		return
 	}
 
 	personaID := chi.URLParam(r, "id")
 	roomID := strings.TrimSpace(r.URL.Query().Get("room_id"))
 	if roomID == "" {
-		writeError(w, http.StatusBadRequest, "room_id query param is required")
+		writeBadRequest(w, "room_id query param is required")
 		return
 	}
 
 	persona, err := s.getPersonaByID(r.Context(), userID, personaID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "persona not found")
+			writeNotFound(w, "persona not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "could not load persona")
+		writeInternalError(w, "could not load persona")
 		return
 	}
 
 	room, err := s.getRoomByID(r.Context(), roomID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "room not found")
+			writeNotFound(w, "room not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "could not load room")
+		writeInternalError(w, "could not load room")
 		return
 	}
 
 	used, err := s.currentQuotaUsage(r.Context(), personaID, "preview")
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not check preview quota")
+		writeInternalError(w, "could not check preview quota")
 		return
 	}
 	if used >= s.cfg.DefaultPreviewQuota {
-		writeError(w, http.StatusTooManyRequests, "daily preview quota reached")
+		writeTooManyRequests(w, "daily preview quota reached")
 		return
 	}
 
@@ -914,11 +866,11 @@ func (s *Server) handlePreviewPersona(w http.ResponseWriter, r *http.Request) {
 			Variant:     variant,
 		})
 		if err != nil {
-			writeError(w, http.StatusBadGateway, fmt.Sprintf("llm preview failed: %v", err))
+			writeBadGateway(w, fmt.Sprintf("llm preview failed: %v", err))
 			return
 		}
 		if err := safety.ValidateContent(draft, s.cfg.DraftMaxLen); err != nil {
-			writeError(w, http.StatusBadRequest, err.Error())
+			writeBadRequest(w, err.Error())
 			return
 		}
 		drafts = append(drafts, PreviewDraft{
@@ -932,7 +884,7 @@ func (s *Server) handlePreviewPersona(w http.ResponseWriter, r *http.Request) {
 		INSERT INTO quota_events(persona_id, quota_type)
 		VALUES ($1, 'preview')
 	`, personaID); err != nil {
-		writeError(w, http.StatusInternalServerError, "could not record preview quota")
+		writeInternalError(w, "could not record preview quota")
 		return
 	}
 
@@ -946,26 +898,25 @@ func (s *Server) handlePreviewPersona(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetTodayDigest(w http.ResponseWriter, r *http.Request) {
-	userID, ok := auth.UserIDFromContext(r.Context())
+	userID, ok := s.requireUserID(w, r)
 	if !ok {
-		writeError(w, http.StatusUnauthorized, "missing user")
 		return
 	}
 	personaID := chi.URLParam(r, "id")
 
 	owned, err := s.personaOwnedByUser(r.Context(), userID, personaID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not check persona")
+		writeInternalError(w, "could not check persona")
 		return
 	}
 	if !owned {
-		writeError(w, http.StatusNotFound, "persona not found")
+		writeNotFound(w, "persona not found")
 		return
 	}
 
 	digest, exists, err := s.getDigestForDate(r.Context(), personaID, time.Now().UTC())
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not load digest")
+		writeInternalError(w, "could not load digest")
 		return
 	}
 	if !exists {
@@ -979,26 +930,25 @@ func (s *Server) handleGetTodayDigest(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetLatestDigest(w http.ResponseWriter, r *http.Request) {
-	userID, ok := auth.UserIDFromContext(r.Context())
+	userID, ok := s.requireUserID(w, r)
 	if !ok {
-		writeError(w, http.StatusUnauthorized, "missing user")
 		return
 	}
 	personaID := chi.URLParam(r, "id")
 
 	owned, err := s.personaOwnedByUser(r.Context(), userID, personaID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not check persona")
+		writeInternalError(w, "could not check persona")
 		return
 	}
 	if !owned {
-		writeError(w, http.StatusNotFound, "persona not found")
+		writeNotFound(w, "persona not found")
 		return
 	}
 
 	digest, exists, err := s.getLatestDigest(r.Context(), personaID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not load digest")
+		writeInternalError(w, "could not load digest")
 		return
 	}
 	if !exists {
@@ -1018,7 +968,7 @@ func (s *Server) handleListRooms(w http.ResponseWriter, r *http.Request) {
 		ORDER BY name ASC
 	`)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not list rooms")
+		writeInternalError(w, "could not list rooms")
 		return
 	}
 	defer rows.Close()
@@ -1027,7 +977,7 @@ func (s *Server) handleListRooms(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var rm Room
 		if err := rows.Scan(&rm.ID, &rm.Slug, &rm.Name, &rm.Description, &rm.CreatedAt); err != nil {
-			writeError(w, http.StatusInternalServerError, "could not scan room")
+			writeInternalError(w, "could not scan room")
 			return
 		}
 		rooms = append(rooms, rm)
@@ -1037,9 +987,8 @@ func (s *Server) handleListRooms(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleListRoomPosts(w http.ResponseWriter, r *http.Request) {
-	userID, ok := auth.UserIDFromContext(r.Context())
+	userID, ok := s.requireUserID(w, r)
 	if !ok {
-		writeError(w, http.StatusUnauthorized, "missing user")
 		return
 	}
 	roomID := chi.URLParam(r, "id")
@@ -1054,7 +1003,7 @@ func (s *Server) handleListRoomPosts(w http.ResponseWriter, r *http.Request) {
 		LIMIT 100
 	`, roomID, userID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not list posts")
+		writeInternalError(w, "could not list posts")
 		return
 	}
 	defer rows.Close()
@@ -1063,7 +1012,7 @@ func (s *Server) handleListRoomPosts(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var p Post
 		if err := rows.Scan(&p.ID, &p.RoomID, &p.PersonaID, &p.Persona, &p.AuthoredBy, &p.Status, &p.Content, &p.CreatedAt, &p.UpdatedAt); err != nil {
-			writeError(w, http.StatusInternalServerError, "could not scan post")
+			writeInternalError(w, "could not scan post")
 			return
 		}
 		posts = append(posts, p)
@@ -1073,9 +1022,8 @@ func (s *Server) handleListRoomPosts(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCreateDraft(w http.ResponseWriter, r *http.Request) {
-	userID, ok := auth.UserIDFromContext(r.Context())
+	userID, ok := s.requireUserID(w, r)
 	if !ok {
-		writeError(w, http.StatusUnauthorized, "missing user")
 		return
 	}
 	roomID := chi.URLParam(r, "id")
@@ -1084,41 +1032,41 @@ func (s *Server) handleCreateDraft(w http.ResponseWriter, r *http.Request) {
 		PersonaID string `json:"persona_id"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeBadRequest(w, err.Error())
 		return
 	}
 	if req.PersonaID == "" {
-		writeError(w, http.StatusBadRequest, "persona_id is required")
+		writeBadRequest(w, "persona_id is required")
 		return
 	}
 
 	persona, err := s.getPersonaByID(r.Context(), userID, req.PersonaID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "persona not found")
+			writeNotFound(w, "persona not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "could not load persona")
+		writeInternalError(w, "could not load persona")
 		return
 	}
 
 	room, err := s.getRoomByID(r.Context(), roomID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "room not found")
+			writeNotFound(w, "room not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "could not load room")
+		writeInternalError(w, "could not load room")
 		return
 	}
 
 	used, err := s.currentQuotaUsage(r.Context(), req.PersonaID, "draft")
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not check quota")
+		writeInternalError(w, "could not check quota")
 		return
 	}
 	if used >= persona.DailyDraftQuota {
-		writeError(w, http.StatusTooManyRequests, "daily draft quota reached")
+		writeTooManyRequests(w, "daily draft quota reached")
 		return
 	}
 
@@ -1129,12 +1077,12 @@ func (s *Server) handleCreateDraft(w http.ResponseWriter, r *http.Request) {
 		Variant:     1,
 	})
 	if err != nil {
-		writeError(w, http.StatusBadGateway, fmt.Sprintf("llm draft failed: %v", err))
+		writeBadGateway(w, fmt.Sprintf("llm draft failed: %v", err))
 		return
 	}
 
 	if err := safety.ValidateContent(draft, s.cfg.DraftMaxLen); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeBadRequest(w, err.Error())
 		return
 	}
 
@@ -1146,7 +1094,7 @@ func (s *Server) handleCreateDraft(w http.ResponseWriter, r *http.Request) {
 	`, roomID, req.PersonaID, userID, draft).
 		Scan(&post.ID, &post.RoomID, &post.PersonaID, &post.AuthoredBy, &post.Status, &post.Content, &post.CreatedAt, &post.UpdatedAt)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not create draft")
+		writeInternalError(w, "could not create draft")
 		return
 	}
 	post.Persona = persona.Name
@@ -1155,7 +1103,7 @@ func (s *Server) handleCreateDraft(w http.ResponseWriter, r *http.Request) {
 		INSERT INTO quota_events(persona_id, quota_type)
 		VALUES ($1, 'draft')
 	`, req.PersonaID); err != nil {
-		writeError(w, http.StatusInternalServerError, "could not record quota")
+		writeInternalError(w, "could not record quota")
 		return
 	}
 
@@ -1163,9 +1111,8 @@ func (s *Server) handleCreateDraft(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleApprovePost(w http.ResponseWriter, r *http.Request) {
-	userID, ok := auth.UserIDFromContext(r.Context())
+	userID, ok := s.requireUserID(w, r)
 	if !ok {
-		writeError(w, http.StatusUnauthorized, "missing user")
 		return
 	}
 	postID := chi.URLParam(r, "id")
@@ -1179,19 +1126,19 @@ func (s *Server) handleApprovePost(w http.ResponseWriter, r *http.Request) {
 	`, postID).Scan(&current.ID, &current.RoomID, &current.PersonaID, &current.AuthoredBy, &current.Status, &current.Content, &current.CreatedAt, &current.UpdatedAt, &ownerUserID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "post not found")
+			writeNotFound(w, "post not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "could not load post")
+		writeInternalError(w, "could not load post")
 		return
 	}
 
 	if ownerUserID != userID {
-		writeError(w, http.StatusForbidden, "not allowed")
+		writeForbidden(w, "not allowed")
 		return
 	}
 	if current.Status != "DRAFT" {
-		writeError(w, http.StatusConflict, "only drafts can be approved")
+		writeConflict(w, "only drafts can be approved")
 		return
 	}
 
@@ -1199,7 +1146,7 @@ func (s *Server) handleApprovePost(w http.ResponseWriter, r *http.Request) {
 		Content string `json:"content"`
 	}
 	if err := decodeJSONAllowEmpty(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeBadRequest(w, err.Error())
 		return
 	}
 
@@ -1209,13 +1156,13 @@ func (s *Server) handleApprovePost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := safety.ValidateContent(content, s.cfg.DraftMaxLen); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeBadRequest(w, err.Error())
 		return
 	}
 
 	tx, err := s.db.Begin(r.Context())
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not start transaction")
+		writeInternalError(w, "could not start transaction")
 		return
 	}
 	defer tx.Rollback(r.Context())
@@ -1229,7 +1176,7 @@ func (s *Server) handleApprovePost(w http.ResponseWriter, r *http.Request) {
 	`, content, postID).
 		Scan(&out.ID, &out.RoomID, &out.PersonaID, &out.AuthoredBy, &out.Status, &out.Content, &out.CreatedAt, &out.UpdatedAt)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not approve post")
+		writeInternalError(w, "could not approve post")
 		return
 	}
 
@@ -1240,17 +1187,17 @@ func (s *Server) handleApprovePost(w http.ResponseWriter, r *http.Request) {
 			"post_preview": common.TruncateRunes(out.Content, 220),
 		}
 		if err := common.InsertPersonaActivityEvent(r.Context(), tx, out.PersonaID, "post_created", metadata); err != nil {
-			writeError(w, http.StatusInternalServerError, "could not record activity")
+			writeInternalError(w, "could not record activity")
 			return
 		}
 		if err := common.InsertPersonaActivityEvent(r.Context(), tx, out.PersonaID, "thread_participated", metadata); err != nil {
-			writeError(w, http.StatusInternalServerError, "could not record activity")
+			writeInternalError(w, "could not record activity")
 			return
 		}
 	}
 
 	if err := tx.Commit(r.Context()); err != nil {
-		writeError(w, http.StatusInternalServerError, "could not commit post approval")
+		writeInternalError(w, "could not commit post approval")
 		return
 	}
 
@@ -1258,9 +1205,8 @@ func (s *Server) handleApprovePost(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGenerateReplies(w http.ResponseWriter, r *http.Request) {
-	userID, ok := auth.UserIDFromContext(r.Context())
+	userID, ok := s.requireUserID(w, r)
 	if !ok {
-		writeError(w, http.StatusUnauthorized, "missing user")
 		return
 	}
 	postID := chi.URLParam(r, "id")
@@ -1273,14 +1219,14 @@ func (s *Server) handleGenerateReplies(w http.ResponseWriter, r *http.Request) {
 	`, postID).Scan(&postStatus)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "post not found")
+			writeNotFound(w, "post not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "could not load post")
+		writeInternalError(w, "could not load post")
 		return
 	}
 	if postStatus != "PUBLISHED" {
-		writeError(w, http.StatusConflict, "replies can be generated only for published posts")
+		writeConflict(w, "replies can be generated only for published posts")
 		return
 	}
 
@@ -1288,13 +1234,13 @@ func (s *Server) handleGenerateReplies(w http.ResponseWriter, r *http.Request) {
 		PersonaIDs []string `json:"persona_ids"`
 	}
 	if err := decodeJSONAllowEmpty(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeBadRequest(w, err.Error())
 		return
 	}
 
 	personaIDs, err := s.resolvePersonaIDsForReplyGeneration(r.Context(), userID, req.PersonaIDs)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeBadRequest(w, err.Error())
 		return
 	}
 
@@ -1359,9 +1305,8 @@ func (s *Server) handleGenerateReplies(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetThread(w http.ResponseWriter, r *http.Request) {
-	userID, ok := auth.UserIDFromContext(r.Context())
+	userID, ok := s.requireUserID(w, r)
 	if !ok {
-		writeError(w, http.StatusUnauthorized, "missing user")
 		return
 	}
 	postID := chi.URLParam(r, "id")
@@ -1376,15 +1321,15 @@ func (s *Server) handleGetThread(w http.ResponseWriter, r *http.Request) {
 	`, postID).Scan(&post.ID, &post.RoomID, &post.PersonaID, &post.Persona, &post.AuthoredBy, &post.Status, &post.Content, &post.CreatedAt, &post.UpdatedAt, &postOwner)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "post not found")
+			writeNotFound(w, "post not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "could not load post")
+		writeInternalError(w, "could not load post")
 		return
 	}
 
 	if post.Status != "PUBLISHED" && postOwner != userID {
-		writeError(w, http.StatusForbidden, "not allowed")
+		writeForbidden(w, "not allowed")
 		return
 	}
 
@@ -1396,7 +1341,7 @@ func (s *Server) handleGetThread(w http.ResponseWriter, r *http.Request) {
 		ORDER BY r.created_at ASC
 	`, postID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not load replies")
+		writeInternalError(w, "could not load replies")
 		return
 	}
 	defer rows.Close()
@@ -1406,7 +1351,7 @@ func (s *Server) handleGetThread(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var reply Reply
 		if err := rows.Scan(&reply.ID, &reply.PostID, &reply.PersonaID, &reply.Persona, &reply.AuthoredBy, &reply.Content, &reply.CreatedAt, &reply.UpdatedAt); err != nil {
-			writeError(w, http.StatusInternalServerError, "could not scan reply")
+			writeInternalError(w, "could not scan reply")
 			return
 		}
 		replies = append(replies, reply)
