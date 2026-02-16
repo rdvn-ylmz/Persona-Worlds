@@ -76,6 +76,17 @@ Optional Redis:
 docker compose --profile optional up -d redis
 ```
 
+If your system cannot create Docker bridge networking (errors mentioning `veth` / `operation not supported`), use host networking override:
+```bash
+docker compose -f docker-compose.yml -f docker-compose.hostnet.yml up --build -d postgres backend worker frontend
+```
+
+If frontend image build/runtime fails in constrained kernels, keep backend+worker in Docker and run frontend locally:
+```bash
+docker compose -f docker-compose.yml -f docker-compose.hostnet.yml up --build -d postgres backend worker
+cd frontend && npm install && npm run dev
+```
+
 ## Run Locally (without Docker)
 
 ### Backend API

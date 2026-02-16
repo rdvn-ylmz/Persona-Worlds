@@ -4,6 +4,7 @@ backend/bin/
 # Frontend
 frontend/node_modules/
 frontend/.next/
+frontend/tsconfig.tsbuildinfo
 
 # Local env
 .env

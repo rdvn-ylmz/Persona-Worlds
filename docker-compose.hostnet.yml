@@ -1,0 +1,37 @@
+# Use this override on systems where Docker bridge networking is unavailable
+# (e.g., missing veth support). It switches services to host networking.
+services:
+  postgres:
+    network_mode: host
+    ports: []
+
+  backend:
+    network_mode: host
+    ports: []
+    build:
+      network: host
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/personaworlds?sslmode=disable
+      FRONTEND_ORIGIN: http://localhost:3000
+
+  worker:
+    network_mode: host
+    build:
+      network: host
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/personaworlds?sslmode=disable
+
+  seed:
+    network_mode: host
+    build:
+      network: host
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/personaworlds?sslmode=disable
+
+  frontend:
+    network_mode: host
+    ports: []
+    build:
+      network: host
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: http://localhost:8080
