@@ -5,7 +5,11 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 API_BASE="${API_BASE:-http://127.0.0.1:8080}"
-USE_HOSTNET="${USE_HOSTNET:-0}"
+
+DEFAULT_COMPOSE_FILES=(-f docker-compose.yml)
+HOSTNET_COMPOSE_FILES=(-f docker-compose.yml -f docker-compose.hostnet.yml)
+COMPOSE_MODE="default"
+compose_files=("${DEFAULT_COMPOSE_FILES[@]}")
 
 if ! command -v docker >/dev/null 2>&1; then
   echo "[smoke] FAIL: docker command not found" >&2
@@ -20,13 +24,25 @@ if ! command -v jq >/dev/null 2>&1; then
   exit 1
 fi
 
-compose_files=(-f docker-compose.yml)
-if [[ "$USE_HOSTNET" == "1" ]]; then
-  compose_files+=(-f docker-compose.hostnet.yml)
-fi
-
 compose() {
   docker compose "${compose_files[@]}" "$@"
+}
+
+set_compose_mode() {
+  local mode="$1"
+  case "$mode" in
+    default)
+      COMPOSE_MODE="default"
+      compose_files=("${DEFAULT_COMPOSE_FILES[@]}")
+      ;;
+    hostnet)
+      COMPOSE_MODE="hostnet"
+      compose_files=("${HOSTNET_COMPOSE_FILES[@]}")
+      ;;
+    *)
+      fail "unknown compose mode: ${mode}"
+      ;;
+  esac
 }
 
 log() {
@@ -39,10 +55,47 @@ fail() {
 }
 
 cleanup() {
-  log "Stopping compose stack"
+  log "Stopping compose stack (mode: ${COMPOSE_MODE})"
   compose down -v --remove-orphans >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
+
+is_bridge_error() {
+  local output="$1"
+  grep -Eqi 'operation not supported|veth|bridge' <<<"$output"
+}
+
+start_stack() {
+  local output=""
+  set_compose_mode default
+  log "Starting compose services (mode: ${COMPOSE_MODE})"
+  if output="$(docker compose "${DEFAULT_COMPOSE_FILES[@]}" up --build -d postgres backend worker 2>&1)"; then
+    log "Compose mode in use: ${COMPOSE_MODE}"
+    return 0
+  fi
+
+  if ! is_bridge_error "$output"; then
+    printf '%s\n' "$output" >&2
+    fail "compose startup failed in ${COMPOSE_MODE} mode"
+  fi
+
+  if [[ ! -f "$ROOT_DIR/docker-compose.hostnet.yml" ]]; then
+    printf '%s\n' "$output" >&2
+    fail "compose startup failed with a bridge/veth error and docker-compose.hostnet.yml is missing"
+  fi
+
+  log "Bridge/veth error detected, retrying in hostnet mode"
+  docker compose "${DEFAULT_COMPOSE_FILES[@]}" down --remove-orphans >/dev/null 2>&1 || true
+
+  if output="$(docker compose "${HOSTNET_COMPOSE_FILES[@]}" up --build -d postgres backend worker 2>&1)"; then
+    set_compose_mode hostnet
+    log "Compose mode in use: ${COMPOSE_MODE}"
+    return 0
+  fi
+
+  printf '%s\n' "$output" >&2
+  fail "compose startup failed in both default and hostnet mode"
+}
 
 HTTP_STATUS=""
 HTTP_BODY=""
@@ -97,14 +150,33 @@ wait_for_backend() {
   fail "backend health check did not become ready"
 }
 
-log "Starting compose services"
-compose up --build -d postgres backend worker
+start_stack
 
 log "Running seed"
 compose --profile tools run --rm seed >/dev/null
 
 log "Waiting for backend health"
 wait_for_backend
+
+log "Check /healthz"
+request GET "${API_BASE}/healthz" "" ""
+assert_status 200
+if ! jq -e '.ok == true' >/dev/null <<<"$HTTP_BODY"; then
+  fail "unexpected /healthz response: ${HTTP_BODY}"
+fi
+
+log "Check /readyz"
+request GET "${API_BASE}/readyz" "" ""
+assert_status 200
+if ! jq -e '.ok == true' >/dev/null <<<"$HTTP_BODY"; then
+  fail "unexpected /readyz response: ${HTTP_BODY}"
+fi
+
+log "Check /metrics"
+METRICS_OUTPUT="$(curl -fsS "${API_BASE}/metrics")"
+if ! grep -q "http_requests_total" <<<"$METRICS_OUTPUT"; then
+  fail "metrics output missing http_requests_total"
+fi
 
 EMAIL="smoke-$(date +%s)-$RANDOM@example.com"
 PASSWORD="password123"

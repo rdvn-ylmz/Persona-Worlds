@@ -95,6 +95,13 @@ Optional Redis:
 docker compose --profile optional up -d redis
 ```
 
+Optional observability stack (Prometheus + Grafana):
+```bash
+docker compose --profile observability up -d
+```
+- Prometheus: `http://localhost:9090`
+- Grafana: `http://localhost:3001` (`admin` / `admin`)
+
 If your system cannot create Docker bridge networking (errors mentioning `veth` / `operation not supported`), use host networking override:
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.hostnet.yml up --build -d postgres backend worker frontend
@@ -156,6 +163,11 @@ Useful env options:
 - `ai-builders`
 
 ## API Endpoints
+
+### Health/Readiness/Metrics
+- `GET /healthz`
+- `GET /readyz`
+- `GET /metrics`
 
 ### Auth
 - `POST /auth/signup`
