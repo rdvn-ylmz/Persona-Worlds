@@ -1,21 +1,17 @@
 package api
 
 import (
-	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
-	"unicode"
 
 	"personaworlds/backend/internal/ai"
 	"personaworlds/backend/internal/auth"
+	"personaworlds/backend/internal/common"
 	"personaworlds/backend/internal/config"
 	"personaworlds/backend/internal/safety"
 
@@ -112,10 +108,6 @@ type PersonaDigest struct {
 	UpdatedAt   time.Time   `json:"updated_at"`
 }
 
-type dbExecutor interface {
-	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
-}
-
 type ipRateLimiter struct {
 	mu      sync.Mutex
 	limit   int
@@ -210,7 +202,7 @@ func (s *Server) publicReadRateLimitMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		clientIP := requestClientIP(r)
 		if !s.publicReadLimiter.allow(clientIP, time.Now()) {
-			writeError(w, http.StatusTooManyRequests, "public profile rate limit exceeded")
+			writeTooManyRequests(w, "public profile rate limit exceeded")
 			return
 		}
 		next.ServeHTTP(w, r)
@@ -221,7 +213,7 @@ func (s *Server) publicWriteRateLimitMiddleware(next http.Handler) http.Handler 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		clientIP := requestClientIP(r)
 		if !s.publicWriteLimiter.allow(clientIP, time.Now()) {
-			writeError(w, http.StatusTooManyRequests, "follow rate limit exceeded")
+			writeTooManyRequests(w, "follow rate limit exceeded")
 			return
 		}
 		next.ServeHTTP(w, r)
@@ -300,19 +292,19 @@ func (s *Server) handleSignup(w http.ResponseWriter, r *http.Request) {
 		Password string `json:"password"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeBadRequest(w, err.Error())
 		return
 	}
 
 	req.Email = strings.TrimSpace(strings.ToLower(req.Email))
 	if !strings.Contains(req.Email, "@") || len(req.Password) < 8 {
-		writeError(w, http.StatusBadRequest, "invalid email or password")
+		writeBadRequest(w, "invalid email or password")
 		return
 	}
 
 	hash, err := auth.HashPassword(req.Password)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not hash password")
+		writeInternalError(w, "could not hash password")
 		return
 	}
 
@@ -325,16 +317,16 @@ func (s *Server) handleSignup(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
-			writeError(w, http.StatusConflict, "email already registered")
+			writeConflict(w, "email already registered")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "could not create user")
+		writeInternalError(w, "could not create user")
 		return
 	}
 
 	token, err := auth.CreateToken(s.cfg.JWTSecret, userID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not create token")
+		writeInternalError(w, "could not create token")
 		return
 	}
 
@@ -347,7 +339,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Password string `json:"password"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeBadRequest(w, err.Error())
 		return
 	}
 
@@ -361,21 +353,21 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	`, req.Email).Scan(&userID, &hash)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			writeError(w, http.StatusUnauthorized, "invalid credentials")
+			writeUnauthorized(w, "invalid credentials")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "could not query user")
+		writeInternalError(w, "could not query user")
 		return
 	}
 
 	if !auth.VerifyPassword(hash, req.Password) {
-		writeError(w, http.StatusUnauthorized, "invalid credentials")
+		writeUnauthorized(w, "invalid credentials")
 		return
 	}
 
 	token, err := auth.CreateToken(s.cfg.JWTSecret, userID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not create token")
+		writeInternalError(w, "could not create token")
 		return
 	}
 
@@ -385,29 +377,29 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleGetPublicProfile(w http.ResponseWriter, r *http.Request) {
 	slug := normalizePublicSlug(chi.URLParam(r, "slug"))
 	if slug == "" {
-		writeError(w, http.StatusNotFound, "public profile not found")
+		writeNotFound(w, "public profile not found")
 		return
 	}
 
 	profile, _, err := s.getPublicProfileBySlug(r.Context(), slug)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "public profile not found")
+			writeNotFound(w, "public profile not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "could not load public profile")
+		writeInternalError(w, "could not load public profile")
 		return
 	}
 
 	latestPosts, nextCursor, err := s.listPublishedPostsForPersona(r.Context(), profile.PersonaID, "", 10)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not load public posts")
+		writeInternalError(w, "could not load public posts")
 		return
 	}
 
 	topRooms, err := s.listTopRoomsForPersona(r.Context(), profile.PersonaID, 3)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not load top rooms")
+		writeInternalError(w, "could not load top rooms")
 		return
 	}
 
@@ -422,24 +414,24 @@ func (s *Server) handleGetPublicProfile(w http.ResponseWriter, r *http.Request) 
 func (s *Server) handleGetPublicProfilePosts(w http.ResponseWriter, r *http.Request) {
 	slug := normalizePublicSlug(chi.URLParam(r, "slug"))
 	if slug == "" {
-		writeError(w, http.StatusNotFound, "public profile not found")
+		writeNotFound(w, "public profile not found")
 		return
 	}
 
 	profile, _, err := s.getPublicProfileBySlug(r.Context(), slug)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "public profile not found")
+			writeNotFound(w, "public profile not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "could not load public profile")
+		writeInternalError(w, "could not load public profile")
 		return
 	}
 
 	cursor := strings.TrimSpace(r.URL.Query().Get("cursor"))
 	posts, nextCursor, err := s.listPublishedPostsForPersona(r.Context(), profile.PersonaID, cursor, 10)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeBadRequest(w, err.Error())
 		return
 	}
 
@@ -452,17 +444,17 @@ func (s *Server) handleGetPublicProfilePosts(w http.ResponseWriter, r *http.Requ
 func (s *Server) handleFollowPublicProfile(w http.ResponseWriter, r *http.Request) {
 	slug := normalizePublicSlug(chi.URLParam(r, "slug"))
 	if slug == "" {
-		writeError(w, http.StatusNotFound, "public profile not found")
+		writeNotFound(w, "public profile not found")
 		return
 	}
 
 	profile, ownerUserID, err := s.getPublicProfileBySlug(r.Context(), slug)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "public profile not found")
+			writeNotFound(w, "public profile not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "could not load public profile")
+		writeInternalError(w, "could not load public profile")
 		return
 	}
 
@@ -475,7 +467,7 @@ func (s *Server) handleFollowPublicProfile(w http.ResponseWriter, r *http.Reques
 	}
 
 	if followerUserID == ownerUserID {
-		writeError(w, http.StatusConflict, "cannot follow your own persona")
+		writeConflict(w, "cannot follow your own persona")
 		return
 	}
 
@@ -485,7 +477,7 @@ func (s *Server) handleFollowPublicProfile(w http.ResponseWriter, r *http.Reques
 		ON CONFLICT (follower_user_id, followed_persona_id) DO NOTHING
 	`, followerUserID, profile.PersonaID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not follow persona")
+		writeInternalError(w, "could not follow persona")
 		return
 	}
 
@@ -495,7 +487,7 @@ func (s *Server) handleFollowPublicProfile(w http.ResponseWriter, r *http.Reques
 		FROM persona_follows
 		WHERE followed_persona_id = $1
 	`, profile.PersonaID).Scan(&followers); err != nil {
-		writeError(w, http.StatusInternalServerError, "could not load followers")
+		writeInternalError(w, "could not load followers")
 		return
 	}
 
@@ -506,9 +498,8 @@ func (s *Server) handleFollowPublicProfile(w http.ResponseWriter, r *http.Reques
 }
 
 func (s *Server) handlePublishPersonaProfile(w http.ResponseWriter, r *http.Request) {
-	userID, ok := auth.UserIDFromContext(r.Context())
+	userID, ok := s.requireUserID(w, r)
 	if !ok {
-		writeError(w, http.StatusUnauthorized, "missing user")
 		return
 	}
 
@@ -518,7 +509,7 @@ func (s *Server) handlePublishPersonaProfile(w http.ResponseWriter, r *http.Requ
 		Bio  string `json:"bio"`
 	}
 	if err := decodeJSONAllowEmpty(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeBadRequest(w, err.Error())
 		return
 	}
 
@@ -533,17 +524,17 @@ func (s *Server) handlePublishPersonaProfile(w http.ResponseWriter, r *http.Requ
 	`, personaID, userID).Scan(&persona.Name, &persona.Bio)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "persona not found")
+			writeNotFound(w, "persona not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "could not load persona")
+		writeInternalError(w, "could not load persona")
 		return
 	}
 
 	requestedSlug := strings.TrimSpace(req.Slug)
 	normalizedRequestedSlug := normalizePublicSlug(requestedSlug)
 	if requestedSlug != "" && normalizedRequestedSlug == "" {
-		writeError(w, http.StatusBadRequest, "slug must contain only letters, numbers, spaces, hyphen or underscore")
+		writeBadRequest(w, "slug must contain only letters, numbers, spaces, hyphen or underscore")
 		return
 	}
 
@@ -559,7 +550,7 @@ func (s *Server) handlePublishPersonaProfile(w http.ResponseWriter, r *http.Requ
 		WHERE persona_id = $1
 	`, personaID).Scan(&currentSlug)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-		writeError(w, http.StatusInternalServerError, "could not inspect profile")
+		writeInternalError(w, "could not inspect profile")
 		return
 	}
 
@@ -575,7 +566,7 @@ func (s *Server) handlePublishPersonaProfile(w http.ResponseWriter, r *http.Requ
 
 	finalSlug, err := s.ensureUniquePublicProfileSlug(r.Context(), baseSlug, personaID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not create unique slug")
+		writeInternalError(w, "could not create unique slug")
 		return
 	}
 
@@ -598,10 +589,10 @@ func (s *Server) handlePublishPersonaProfile(w http.ResponseWriter, r *http.Requ
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
-			writeError(w, http.StatusConflict, "slug already in use")
+			writeConflict(w, "slug already in use")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "could not publish profile")
+		writeInternalError(w, "could not publish profile")
 		return
 	}
 
@@ -617,9 +608,8 @@ func (s *Server) handlePublishPersonaProfile(w http.ResponseWriter, r *http.Requ
 }
 
 func (s *Server) handleUnpublishPersonaProfile(w http.ResponseWriter, r *http.Request) {
-	userID, ok := auth.UserIDFromContext(r.Context())
+	userID, ok := s.requireUserID(w, r)
 	if !ok {
-		writeError(w, http.StatusUnauthorized, "missing user")
 		return
 	}
 	personaID := chi.URLParam(r, "id")
@@ -632,11 +622,11 @@ func (s *Server) handleUnpublishPersonaProfile(w http.ResponseWriter, r *http.Re
 			WHERE id = $1 AND user_id = $2
 		)
 	`, personaID, userID).Scan(&exists); err != nil {
-		writeError(w, http.StatusInternalServerError, "could not validate persona")
+		writeInternalError(w, "could not validate persona")
 		return
 	}
 	if !exists {
-		writeError(w, http.StatusNotFound, "persona not found")
+		writeNotFound(w, "persona not found")
 		return
 	}
 
@@ -647,7 +637,7 @@ func (s *Server) handleUnpublishPersonaProfile(w http.ResponseWriter, r *http.Re
 		WHERE persona_id = $1
 	`, personaID).Scan(&slug)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-		writeError(w, http.StatusInternalServerError, "could not load profile")
+		writeInternalError(w, "could not load profile")
 		return
 	}
 
@@ -657,7 +647,7 @@ func (s *Server) handleUnpublishPersonaProfile(w http.ResponseWriter, r *http.Re
 			SET is_public = FALSE
 			WHERE persona_id = $1
 		`, personaID); err != nil {
-			writeError(w, http.StatusInternalServerError, "could not unpublish profile")
+			writeInternalError(w, "could not unpublish profile")
 			return
 		}
 	}
@@ -675,9 +665,8 @@ func (s *Server) handleUnpublishPersonaProfile(w http.ResponseWriter, r *http.Re
 }
 
 func (s *Server) handleListPersonas(w http.ResponseWriter, r *http.Request) {
-	userID, ok := auth.UserIDFromContext(r.Context())
+	userID, ok := s.requireUserID(w, r)
 	if !ok {
-		writeError(w, http.StatusUnauthorized, "missing user")
 		return
 	}
 
@@ -688,7 +677,7 @@ func (s *Server) handleListPersonas(w http.ResponseWriter, r *http.Request) {
 		ORDER BY created_at DESC
 	`, userID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not list personas")
+		writeInternalError(w, "could not list personas")
 		return
 	}
 	defer rows.Close()
@@ -697,7 +686,7 @@ func (s *Server) handleListPersonas(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var p Persona
 		if err := scanPersona(rows, &p); err != nil {
-			writeError(w, http.StatusInternalServerError, "could not scan persona")
+			writeInternalError(w, "could not scan persona")
 			return
 		}
 		personas = append(personas, p)
@@ -707,50 +696,27 @@ func (s *Server) handleListPersonas(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCreatePersona(w http.ResponseWriter, r *http.Request) {
-	userID, ok := auth.UserIDFromContext(r.Context())
+	userID, ok := s.requireUserID(w, r)
 	if !ok {
-		writeError(w, http.StatusUnauthorized, "missing user")
 		return
 	}
 
-	var req struct {
-		Name              string   `json:"name"`
-		Bio               string   `json:"bio"`
-		Tone              string   `json:"tone"`
-		WritingSamples    []string `json:"writing_samples"`
-		DoNotSay          []string `json:"do_not_say"`
-		Catchphrases      []string `json:"catchphrases"`
-		PreferredLanguage string   `json:"preferred_language"`
-		Formality         int      `json:"formality"`
-		DailyDraftQuota   int      `json:"daily_draft_quota"`
-		DailyReplyQuota   int      `json:"daily_reply_quota"`
-	}
+	var req personaUpsertRequest
 	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeBadRequest(w, err.Error())
 		return
 	}
 
-	input, err := normalizePersonaInput(req.Name, req.Bio, req.Tone, req.WritingSamples, req.DoNotSay, req.Catchphrases, req.PreferredLanguage, req.Formality)
+	input, err := req.normalizedPersonaInput()
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeBadRequest(w, err.Error())
 		return
 	}
 
-	if input.Name == "" {
-		writeError(w, http.StatusBadRequest, "name is required")
-		return
-	}
-	if req.DailyDraftQuota <= 0 {
-		req.DailyDraftQuota = s.cfg.DefaultDraftQuota
-	}
-	if req.DailyReplyQuota <= 0 {
-		req.DailyReplyQuota = s.cfg.DefaultReplyQuota
-	}
+	req.applyDefaultQuotas(s.cfg.DefaultDraftQuota, s.cfg.DefaultReplyQuota)
 
 	var p Persona
-	writingSamplesJSON, _ := json.Marshal(input.WritingSamples)
-	doNotSayJSON, _ := json.Marshal(input.DoNotSay)
-	catchphrasesJSON, _ := json.Marshal(input.Catchphrases)
+	writingSamplesJSON, doNotSayJSON, catchphrasesJSON := marshalPersonaJSONFields(input)
 
 	err = scanPersona(s.db.QueryRow(r.Context(), `
 		INSERT INTO personas(user_id, name, bio, tone, writing_samples, do_not_say, catchphrases, preferred_language, formality, daily_draft_quota, daily_reply_quota)
@@ -758,7 +724,7 @@ func (s *Server) handleCreatePersona(w http.ResponseWriter, r *http.Request) {
 		RETURNING id::text, name, bio, tone, writing_samples, do_not_say, catchphrases, preferred_language, formality, daily_draft_quota, daily_reply_quota, created_at, updated_at
 	`, userID, input.Name, input.Bio, input.Tone, writingSamplesJSON, doNotSayJSON, catchphrasesJSON, input.PreferredLanguage, input.Formality, req.DailyDraftQuota, req.DailyReplyQuota), &p)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not create persona")
+		writeInternalError(w, "could not create persona")
 		return
 	}
 
@@ -766,9 +732,8 @@ func (s *Server) handleCreatePersona(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetPersona(w http.ResponseWriter, r *http.Request) {
-	userID, ok := auth.UserIDFromContext(r.Context())
+	userID, ok := s.requireUserID(w, r)
 	if !ok {
-		writeError(w, http.StatusUnauthorized, "missing user")
 		return
 	}
 	personaID := chi.URLParam(r, "id")
@@ -776,10 +741,10 @@ func (s *Server) handleGetPersona(w http.ResponseWriter, r *http.Request) {
 	p, err := s.getPersonaByID(r.Context(), userID, personaID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "persona not found")
+			writeNotFound(w, "persona not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "could not get persona")
+		writeInternalError(w, "could not get persona")
 		return
 	}
 
@@ -787,48 +752,30 @@ func (s *Server) handleGetPersona(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleUpdatePersona(w http.ResponseWriter, r *http.Request) {
-	userID, ok := auth.UserIDFromContext(r.Context())
+	userID, ok := s.requireUserID(w, r)
 	if !ok {
-		writeError(w, http.StatusUnauthorized, "missing user")
 		return
 	}
 	personaID := chi.URLParam(r, "id")
 
-	var req struct {
-		Name              string   `json:"name"`
-		Bio               string   `json:"bio"`
-		Tone              string   `json:"tone"`
-		WritingSamples    []string `json:"writing_samples"`
-		DoNotSay          []string `json:"do_not_say"`
-		Catchphrases      []string `json:"catchphrases"`
-		PreferredLanguage string   `json:"preferred_language"`
-		Formality         int      `json:"formality"`
-		DailyDraftQuota   int      `json:"daily_draft_quota"`
-		DailyReplyQuota   int      `json:"daily_reply_quota"`
-	}
+	var req personaUpsertRequest
 	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeBadRequest(w, err.Error())
 		return
 	}
 
-	input, err := normalizePersonaInput(req.Name, req.Bio, req.Tone, req.WritingSamples, req.DoNotSay, req.Catchphrases, req.PreferredLanguage, req.Formality)
+	input, err := req.normalizedPersonaInput()
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeBadRequest(w, err.Error())
 		return
 	}
-	if input.Name == "" {
-		writeError(w, http.StatusBadRequest, "name is required")
-		return
-	}
-	if req.DailyDraftQuota <= 0 || req.DailyReplyQuota <= 0 {
-		writeError(w, http.StatusBadRequest, "quotas must be positive")
+	if err := req.validatePositiveQuotas(); err != nil {
+		writeBadRequest(w, err.Error())
 		return
 	}
 
 	var p Persona
-	writingSamplesJSON, _ := json.Marshal(input.WritingSamples)
-	doNotSayJSON, _ := json.Marshal(input.DoNotSay)
-	catchphrasesJSON, _ := json.Marshal(input.Catchphrases)
+	writingSamplesJSON, doNotSayJSON, catchphrasesJSON := marshalPersonaJSONFields(input)
 
 	err = scanPersona(s.db.QueryRow(r.Context(), `
 		UPDATE personas
@@ -838,10 +785,10 @@ func (s *Server) handleUpdatePersona(w http.ResponseWriter, r *http.Request) {
 	`, input.Name, input.Bio, input.Tone, writingSamplesJSON, doNotSayJSON, catchphrasesJSON, input.PreferredLanguage, input.Formality, req.DailyDraftQuota, req.DailyReplyQuota, personaID, userID), &p)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "persona not found")
+			writeNotFound(w, "persona not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "could not update persona")
+		writeInternalError(w, "could not update persona")
 		return
 	}
 
@@ -849,20 +796,19 @@ func (s *Server) handleUpdatePersona(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDeletePersona(w http.ResponseWriter, r *http.Request) {
-	userID, ok := auth.UserIDFromContext(r.Context())
+	userID, ok := s.requireUserID(w, r)
 	if !ok {
-		writeError(w, http.StatusUnauthorized, "missing user")
 		return
 	}
 	personaID := chi.URLParam(r, "id")
 
 	ct, err := s.db.Exec(r.Context(), "DELETE FROM personas WHERE id=$1 AND user_id=$2", personaID, userID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not delete persona")
+		writeInternalError(w, "could not delete persona")
 		return
 	}
 	if ct.RowsAffected() == 0 {
-		writeError(w, http.StatusNotFound, "persona not found")
+		writeNotFound(w, "persona not found")
 		return
 	}
 
@@ -870,46 +816,45 @@ func (s *Server) handleDeletePersona(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handlePreviewPersona(w http.ResponseWriter, r *http.Request) {
-	userID, ok := auth.UserIDFromContext(r.Context())
+	userID, ok := s.requireUserID(w, r)
 	if !ok {
-		writeError(w, http.StatusUnauthorized, "missing user")
 		return
 	}
 
 	personaID := chi.URLParam(r, "id")
 	roomID := strings.TrimSpace(r.URL.Query().Get("room_id"))
 	if roomID == "" {
-		writeError(w, http.StatusBadRequest, "room_id query param is required")
+		writeBadRequest(w, "room_id query param is required")
 		return
 	}
 
 	persona, err := s.getPersonaByID(r.Context(), userID, personaID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "persona not found")
+			writeNotFound(w, "persona not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "could not load persona")
+		writeInternalError(w, "could not load persona")
 		return
 	}
 
 	room, err := s.getRoomByID(r.Context(), roomID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "room not found")
+			writeNotFound(w, "room not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "could not load room")
+		writeInternalError(w, "could not load room")
 		return
 	}
 
 	used, err := s.currentQuotaUsage(r.Context(), personaID, "preview")
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not check preview quota")
+		writeInternalError(w, "could not check preview quota")
 		return
 	}
 	if used >= s.cfg.DefaultPreviewQuota {
-		writeError(w, http.StatusTooManyRequests, "daily preview quota reached")
+		writeTooManyRequests(w, "daily preview quota reached")
 		return
 	}
 
@@ -922,11 +867,11 @@ func (s *Server) handlePreviewPersona(w http.ResponseWriter, r *http.Request) {
 			Variant:     variant,
 		})
 		if err != nil {
-			writeError(w, http.StatusBadGateway, fmt.Sprintf("llm preview failed: %v", err))
+			writeBadGateway(w, fmt.Sprintf("llm preview failed: %v", err))
 			return
 		}
 		if err := safety.ValidateContent(draft, s.cfg.DraftMaxLen); err != nil {
-			writeError(w, http.StatusBadRequest, err.Error())
+			writeBadRequest(w, err.Error())
 			return
 		}
 		drafts = append(drafts, PreviewDraft{
@@ -940,7 +885,7 @@ func (s *Server) handlePreviewPersona(w http.ResponseWriter, r *http.Request) {
 		INSERT INTO quota_events(persona_id, quota_type)
 		VALUES ($1, 'preview')
 	`, personaID); err != nil {
-		writeError(w, http.StatusInternalServerError, "could not record preview quota")
+		writeInternalError(w, "could not record preview quota")
 		return
 	}
 
@@ -954,26 +899,25 @@ func (s *Server) handlePreviewPersona(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetTodayDigest(w http.ResponseWriter, r *http.Request) {
-	userID, ok := auth.UserIDFromContext(r.Context())
+	userID, ok := s.requireUserID(w, r)
 	if !ok {
-		writeError(w, http.StatusUnauthorized, "missing user")
 		return
 	}
 	personaID := chi.URLParam(r, "id")
 
 	owned, err := s.personaOwnedByUser(r.Context(), userID, personaID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not check persona")
+		writeInternalError(w, "could not check persona")
 		return
 	}
 	if !owned {
-		writeError(w, http.StatusNotFound, "persona not found")
+		writeNotFound(w, "persona not found")
 		return
 	}
 
 	digest, exists, err := s.getDigestForDate(r.Context(), personaID, time.Now().UTC())
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not load digest")
+		writeInternalError(w, "could not load digest")
 		return
 	}
 	if !exists {
@@ -987,26 +931,25 @@ func (s *Server) handleGetTodayDigest(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetLatestDigest(w http.ResponseWriter, r *http.Request) {
-	userID, ok := auth.UserIDFromContext(r.Context())
+	userID, ok := s.requireUserID(w, r)
 	if !ok {
-		writeError(w, http.StatusUnauthorized, "missing user")
 		return
 	}
 	personaID := chi.URLParam(r, "id")
 
 	owned, err := s.personaOwnedByUser(r.Context(), userID, personaID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not check persona")
+		writeInternalError(w, "could not check persona")
 		return
 	}
 	if !owned {
-		writeError(w, http.StatusNotFound, "persona not found")
+		writeNotFound(w, "persona not found")
 		return
 	}
 
 	digest, exists, err := s.getLatestDigest(r.Context(), personaID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not load digest")
+		writeInternalError(w, "could not load digest")
 		return
 	}
 	if !exists {
@@ -1026,7 +969,7 @@ func (s *Server) handleListRooms(w http.ResponseWriter, r *http.Request) {
 		ORDER BY name ASC
 	`)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not list rooms")
+		writeInternalError(w, "could not list rooms")
 		return
 	}
 	defer rows.Close()
@@ -1035,7 +978,7 @@ func (s *Server) handleListRooms(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var rm Room
 		if err := rows.Scan(&rm.ID, &rm.Slug, &rm.Name, &rm.Description, &rm.CreatedAt); err != nil {
-			writeError(w, http.StatusInternalServerError, "could not scan room")
+			writeInternalError(w, "could not scan room")
 			return
 		}
 		rooms = append(rooms, rm)
@@ -1045,9 +988,8 @@ func (s *Server) handleListRooms(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleListRoomPosts(w http.ResponseWriter, r *http.Request) {
-	userID, ok := auth.UserIDFromContext(r.Context())
+	userID, ok := s.requireUserID(w, r)
 	if !ok {
-		writeError(w, http.StatusUnauthorized, "missing user")
 		return
 	}
 	roomID := chi.URLParam(r, "id")
@@ -1062,7 +1004,7 @@ func (s *Server) handleListRoomPosts(w http.ResponseWriter, r *http.Request) {
 		LIMIT 100
 	`, roomID, userID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not list posts")
+		writeInternalError(w, "could not list posts")
 		return
 	}
 	defer rows.Close()
@@ -1071,7 +1013,7 @@ func (s *Server) handleListRoomPosts(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var p Post
 		if err := rows.Scan(&p.ID, &p.RoomID, &p.PersonaID, &p.Persona, &p.AuthoredBy, &p.Status, &p.Content, &p.CreatedAt, &p.UpdatedAt); err != nil {
-			writeError(w, http.StatusInternalServerError, "could not scan post")
+			writeInternalError(w, "could not scan post")
 			return
 		}
 		posts = append(posts, p)
@@ -1081,9 +1023,8 @@ func (s *Server) handleListRoomPosts(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCreateDraft(w http.ResponseWriter, r *http.Request) {
-	userID, ok := auth.UserIDFromContext(r.Context())
+	userID, ok := s.requireUserID(w, r)
 	if !ok {
-		writeError(w, http.StatusUnauthorized, "missing user")
 		return
 	}
 	roomID := chi.URLParam(r, "id")
@@ -1092,41 +1033,41 @@ func (s *Server) handleCreateDraft(w http.ResponseWriter, r *http.Request) {
 		PersonaID string `json:"persona_id"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeBadRequest(w, err.Error())
 		return
 	}
 	if req.PersonaID == "" {
-		writeError(w, http.StatusBadRequest, "persona_id is required")
+		writeBadRequest(w, "persona_id is required")
 		return
 	}
 
 	persona, err := s.getPersonaByID(r.Context(), userID, req.PersonaID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "persona not found")
+			writeNotFound(w, "persona not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "could not load persona")
+		writeInternalError(w, "could not load persona")
 		return
 	}
 
 	room, err := s.getRoomByID(r.Context(), roomID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "room not found")
+			writeNotFound(w, "room not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "could not load room")
+		writeInternalError(w, "could not load room")
 		return
 	}
 
 	used, err := s.currentQuotaUsage(r.Context(), req.PersonaID, "draft")
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not check quota")
+		writeInternalError(w, "could not check quota")
 		return
 	}
 	if used >= persona.DailyDraftQuota {
-		writeError(w, http.StatusTooManyRequests, "daily draft quota reached")
+		writeTooManyRequests(w, "daily draft quota reached")
 		return
 	}
 
@@ -1137,12 +1078,12 @@ func (s *Server) handleCreateDraft(w http.ResponseWriter, r *http.Request) {
 		Variant:     1,
 	})
 	if err != nil {
-		writeError(w, http.StatusBadGateway, fmt.Sprintf("llm draft failed: %v", err))
+		writeBadGateway(w, fmt.Sprintf("llm draft failed: %v", err))
 		return
 	}
 
 	if err := safety.ValidateContent(draft, s.cfg.DraftMaxLen); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeBadRequest(w, err.Error())
 		return
 	}
 
@@ -1154,7 +1095,7 @@ func (s *Server) handleCreateDraft(w http.ResponseWriter, r *http.Request) {
 	`, roomID, req.PersonaID, userID, draft).
 		Scan(&post.ID, &post.RoomID, &post.PersonaID, &post.AuthoredBy, &post.Status, &post.Content, &post.CreatedAt, &post.UpdatedAt)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not create draft")
+		writeInternalError(w, "could not create draft")
 		return
 	}
 	post.Persona = persona.Name
@@ -1163,7 +1104,7 @@ func (s *Server) handleCreateDraft(w http.ResponseWriter, r *http.Request) {
 		INSERT INTO quota_events(persona_id, quota_type)
 		VALUES ($1, 'draft')
 	`, req.PersonaID); err != nil {
-		writeError(w, http.StatusInternalServerError, "could not record quota")
+		writeInternalError(w, "could not record quota")
 		return
 	}
 
@@ -1171,9 +1112,8 @@ func (s *Server) handleCreateDraft(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleApprovePost(w http.ResponseWriter, r *http.Request) {
-	userID, ok := auth.UserIDFromContext(r.Context())
+	userID, ok := s.requireUserID(w, r)
 	if !ok {
-		writeError(w, http.StatusUnauthorized, "missing user")
 		return
 	}
 	postID := chi.URLParam(r, "id")
@@ -1187,19 +1127,19 @@ func (s *Server) handleApprovePost(w http.ResponseWriter, r *http.Request) {
 	`, postID).Scan(&current.ID, &current.RoomID, &current.PersonaID, &current.AuthoredBy, &current.Status, &current.Content, &current.CreatedAt, &current.UpdatedAt, &ownerUserID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "post not found")
+			writeNotFound(w, "post not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "could not load post")
+		writeInternalError(w, "could not load post")
 		return
 	}
 
 	if ownerUserID != userID {
-		writeError(w, http.StatusForbidden, "not allowed")
+		writeForbidden(w, "not allowed")
 		return
 	}
 	if current.Status != "DRAFT" {
-		writeError(w, http.StatusConflict, "only drafts can be approved")
+		writeConflict(w, "only drafts can be approved")
 		return
 	}
 
@@ -1207,7 +1147,7 @@ func (s *Server) handleApprovePost(w http.ResponseWriter, r *http.Request) {
 		Content string `json:"content"`
 	}
 	if err := decodeJSONAllowEmpty(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeBadRequest(w, err.Error())
 		return
 	}
 
@@ -1217,13 +1157,13 @@ func (s *Server) handleApprovePost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := safety.ValidateContent(content, s.cfg.DraftMaxLen); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeBadRequest(w, err.Error())
 		return
 	}
 
 	tx, err := s.db.Begin(r.Context())
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not start transaction")
+		writeInternalError(w, "could not start transaction")
 		return
 	}
 	defer tx.Rollback(r.Context())
@@ -1237,7 +1177,7 @@ func (s *Server) handleApprovePost(w http.ResponseWriter, r *http.Request) {
 	`, content, postID).
 		Scan(&out.ID, &out.RoomID, &out.PersonaID, &out.AuthoredBy, &out.Status, &out.Content, &out.CreatedAt, &out.UpdatedAt)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not approve post")
+		writeInternalError(w, "could not approve post")
 		return
 	}
 
@@ -1245,20 +1185,20 @@ func (s *Server) handleApprovePost(w http.ResponseWriter, r *http.Request) {
 		metadata := map[string]any{
 			"post_id":      out.ID,
 			"room_id":      out.RoomID,
-			"post_preview": truncateText(out.Content, 220),
+			"post_preview": common.TruncateRunes(out.Content, 220),
 		}
-		if err := insertPersonaActivityEvent(r.Context(), tx, out.PersonaID, "post_created", metadata); err != nil {
-			writeError(w, http.StatusInternalServerError, "could not record activity")
+		if err := common.InsertPersonaActivityEvent(r.Context(), tx, out.PersonaID, "post_created", metadata); err != nil {
+			writeInternalError(w, "could not record activity")
 			return
 		}
-		if err := insertPersonaActivityEvent(r.Context(), tx, out.PersonaID, "thread_participated", metadata); err != nil {
-			writeError(w, http.StatusInternalServerError, "could not record activity")
+		if err := common.InsertPersonaActivityEvent(r.Context(), tx, out.PersonaID, "thread_participated", metadata); err != nil {
+			writeInternalError(w, "could not record activity")
 			return
 		}
 	}
 
 	if err := tx.Commit(r.Context()); err != nil {
-		writeError(w, http.StatusInternalServerError, "could not commit post approval")
+		writeInternalError(w, "could not commit post approval")
 		return
 	}
 
@@ -1266,9 +1206,8 @@ func (s *Server) handleApprovePost(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGenerateReplies(w http.ResponseWriter, r *http.Request) {
-	userID, ok := auth.UserIDFromContext(r.Context())
+	userID, ok := s.requireUserID(w, r)
 	if !ok {
-		writeError(w, http.StatusUnauthorized, "missing user")
 		return
 	}
 	postID := chi.URLParam(r, "id")
@@ -1281,14 +1220,14 @@ func (s *Server) handleGenerateReplies(w http.ResponseWriter, r *http.Request) {
 	`, postID).Scan(&postStatus)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "post not found")
+			writeNotFound(w, "post not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "could not load post")
+		writeInternalError(w, "could not load post")
 		return
 	}
 	if postStatus != "PUBLISHED" {
-		writeError(w, http.StatusConflict, "replies can be generated only for published posts")
+		writeConflict(w, "replies can be generated only for published posts")
 		return
 	}
 
@@ -1296,13 +1235,13 @@ func (s *Server) handleGenerateReplies(w http.ResponseWriter, r *http.Request) {
 		PersonaIDs []string `json:"persona_ids"`
 	}
 	if err := decodeJSONAllowEmpty(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeBadRequest(w, err.Error())
 		return
 	}
 
 	personaIDs, err := s.resolvePersonaIDsForReplyGeneration(r.Context(), userID, req.PersonaIDs)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeBadRequest(w, err.Error())
 		return
 	}
 
@@ -1367,9 +1306,8 @@ func (s *Server) handleGenerateReplies(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetThread(w http.ResponseWriter, r *http.Request) {
-	userID, ok := auth.UserIDFromContext(r.Context())
+	userID, ok := s.requireUserID(w, r)
 	if !ok {
-		writeError(w, http.StatusUnauthorized, "missing user")
 		return
 	}
 	postID := chi.URLParam(r, "id")
@@ -1384,15 +1322,15 @@ func (s *Server) handleGetThread(w http.ResponseWriter, r *http.Request) {
 	`, postID).Scan(&post.ID, &post.RoomID, &post.PersonaID, &post.Persona, &post.AuthoredBy, &post.Status, &post.Content, &post.CreatedAt, &post.UpdatedAt, &postOwner)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "post not found")
+			writeNotFound(w, "post not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "could not load post")
+		writeInternalError(w, "could not load post")
 		return
 	}
 
 	if post.Status != "PUBLISHED" && postOwner != userID {
-		writeError(w, http.StatusForbidden, "not allowed")
+		writeForbidden(w, "not allowed")
 		return
 	}
 
@@ -1404,7 +1342,7 @@ func (s *Server) handleGetThread(w http.ResponseWriter, r *http.Request) {
 		ORDER BY r.created_at ASC
 	`, postID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not load replies")
+		writeInternalError(w, "could not load replies")
 		return
 	}
 	defer rows.Close()
@@ -1414,7 +1352,7 @@ func (s *Server) handleGetThread(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var reply Reply
 		if err := rows.Scan(&reply.ID, &reply.PostID, &reply.PersonaID, &reply.Persona, &reply.AuthoredBy, &reply.Content, &reply.CreatedAt, &reply.UpdatedAt); err != nil {
-			writeError(w, http.StatusInternalServerError, "could not scan reply")
+			writeInternalError(w, "could not scan reply")
 			return
 		}
 		replies = append(replies, reply)
@@ -1435,667 +1373,4 @@ func (s *Server) handleGetThread(w http.ResponseWriter, r *http.Request) {
 		"replies":    replies,
 		"ai_summary": summary,
 	})
-}
-
-func (s *Server) getPersonaByID(ctx context.Context, userID, personaID string) (Persona, error) {
-	var p Persona
-	err := scanPersona(s.db.QueryRow(ctx, `
-		SELECT id::text, name, bio, tone, writing_samples, do_not_say, catchphrases, preferred_language, formality, daily_draft_quota, daily_reply_quota, created_at, updated_at
-		FROM personas
-		WHERE id = $1 AND user_id = $2
-	`, personaID, userID), &p)
-	return p, err
-}
-
-func (s *Server) getRoomByID(ctx context.Context, roomID string) (Room, error) {
-	var rm Room
-	err := s.db.QueryRow(ctx, `
-		SELECT id::text, slug, name, description, created_at
-		FROM rooms
-		WHERE id = $1
-	`, roomID).Scan(&rm.ID, &rm.Slug, &rm.Name, &rm.Description, &rm.CreatedAt)
-	return rm, err
-}
-
-func (s *Server) currentQuotaUsage(ctx context.Context, personaID, quotaType string) (int, error) {
-	var used int
-	err := s.db.QueryRow(ctx, `
-		SELECT COUNT(*)
-		FROM quota_events
-		WHERE persona_id = $1
-		  AND quota_type = $2
-		  AND created_at >= date_trunc('day', NOW())
-	`, personaID, quotaType).Scan(&used)
-	return used, err
-}
-
-func (s *Server) resolvePersonaIDsForReplyGeneration(ctx context.Context, userID string, provided []string) ([]string, error) {
-	if len(provided) > 0 {
-		ids := make([]string, 0, len(provided))
-		seen := map[string]struct{}{}
-		for _, id := range provided {
-			id = strings.TrimSpace(id)
-			if id == "" {
-				continue
-			}
-			if _, exists := seen[id]; exists {
-				continue
-			}
-			seen[id] = struct{}{}
-
-			var exists bool
-			err := s.db.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM personas WHERE id=$1 AND user_id=$2)", id, userID).Scan(&exists)
-			if err != nil {
-				return nil, fmt.Errorf("could not validate persona")
-			}
-			if !exists {
-				return nil, fmt.Errorf("persona %s not found", id)
-			}
-			ids = append(ids, id)
-		}
-		if len(ids) == 0 {
-			return nil, fmt.Errorf("persona_ids cannot be empty")
-		}
-		return ids, nil
-	}
-
-	rows, err := s.db.Query(ctx, `
-		SELECT id::text
-		FROM personas
-		WHERE user_id = $1
-		ORDER BY created_at ASC
-		LIMIT 3
-	`, userID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	ids := make([]string, 0, 3)
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		ids = append(ids, id)
-	}
-	if len(ids) == 0 {
-		return nil, fmt.Errorf("no personas available")
-	}
-	return ids, nil
-}
-
-func (s *Server) optionalUserIDFromRequest(r *http.Request) (string, bool) {
-	header := strings.TrimSpace(r.Header.Get("Authorization"))
-	if header == "" {
-		return "", false
-	}
-	parts := strings.SplitN(header, " ", 2)
-	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
-		return "", false
-	}
-	claims, err := auth.ParseToken(s.cfg.JWTSecret, parts[1])
-	if err != nil {
-		return "", false
-	}
-	if strings.TrimSpace(claims.UserID) == "" {
-		return "", false
-	}
-	return strings.TrimSpace(claims.UserID), true
-}
-
-func (s *Server) getPublicProfileBySlug(ctx context.Context, slug string) (PublicPersonaProfile, string, error) {
-	var (
-		profile     PublicPersonaProfile
-		ownerUserID string
-	)
-	err := s.db.QueryRow(ctx, `
-		SELECT
-			p.id::text,
-			p.user_id::text,
-			pp.slug,
-			p.name,
-			COALESCE(NULLIF(pp.bio, ''), p.bio),
-			p.tone,
-			p.preferred_language,
-			p.formality,
-			pp.is_public,
-			pp.created_at,
-			COALESCE((SELECT COUNT(*)::int FROM persona_follows f WHERE f.followed_persona_id = p.id), 0),
-			COALESCE((SELECT COUNT(*)::int FROM posts ps WHERE ps.persona_id = p.id AND ps.status = 'PUBLISHED'), 0)
-		FROM persona_public_profiles pp
-		JOIN personas p ON p.id = pp.persona_id
-		WHERE pp.slug = $1
-		  AND pp.is_public = TRUE
-	`, slug).Scan(
-		&profile.PersonaID,
-		&ownerUserID,
-		&profile.Slug,
-		&profile.Name,
-		&profile.Bio,
-		&profile.Tone,
-		&profile.PreferredLanguage,
-		&profile.Formality,
-		&profile.IsPublic,
-		&profile.CreatedAt,
-		&profile.Followers,
-		&profile.PostsCount,
-	)
-	if err != nil {
-		return PublicPersonaProfile{}, "", err
-	}
-	profile.Badges = buildPublicProfileBadges(profile)
-	return profile, ownerUserID, nil
-}
-
-func (s *Server) listPublishedPostsForPersona(ctx context.Context, personaID, cursor string, limit int) ([]PublicPost, string, error) {
-	if limit <= 0 {
-		limit = 10
-	}
-	if limit > 50 {
-		limit = 50
-	}
-
-	var (
-		rows pgx.Rows
-		err  error
-	)
-	if strings.TrimSpace(cursor) == "" {
-		rows, err = s.db.Query(ctx, `
-			SELECT p.id::text, p.room_id::text, COALESCE(r.name, ''), p.authored_by::text, p.content, p.created_at
-			FROM posts p
-			LEFT JOIN rooms r ON r.id = p.room_id
-			WHERE p.persona_id = $1
-			  AND p.status = 'PUBLISHED'
-			ORDER BY p.created_at DESC, p.id DESC
-			LIMIT $2
-		`, personaID, limit)
-	} else {
-		cursorTime, cursorID, parseErr := parsePublicPostCursor(cursor)
-		if parseErr != nil {
-			return nil, "", fmt.Errorf("invalid cursor")
-		}
-		rows, err = s.db.Query(ctx, `
-			SELECT p.id::text, p.room_id::text, COALESCE(r.name, ''), p.authored_by::text, p.content, p.created_at
-			FROM posts p
-			LEFT JOIN rooms r ON r.id = p.room_id
-			WHERE p.persona_id = $1
-			  AND p.status = 'PUBLISHED'
-			  AND (p.created_at < $2 OR (p.created_at = $2 AND p.id < $3::uuid))
-			ORDER BY p.created_at DESC, p.id DESC
-			LIMIT $4
-		`, personaID, cursorTime, cursorID, limit)
-	}
-	if err != nil {
-		return nil, "", err
-	}
-	defer rows.Close()
-
-	posts := make([]PublicPost, 0, limit)
-	for rows.Next() {
-		var post PublicPost
-		if err := rows.Scan(&post.ID, &post.RoomID, &post.RoomName, &post.AuthoredBy, &post.Content, &post.CreatedAt); err != nil {
-			return nil, "", err
-		}
-		posts = append(posts, post)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, "", err
-	}
-
-	nextCursor := ""
-	if len(posts) == limit {
-		last := posts[len(posts)-1]
-		nextCursor = buildPublicPostCursor(last.CreatedAt, last.ID)
-	}
-	return posts, nextCursor, nil
-}
-
-func (s *Server) listTopRoomsForPersona(ctx context.Context, personaID string, limit int) ([]PublicRoomStat, error) {
-	if limit <= 0 {
-		limit = 3
-	}
-	if limit > 10 {
-		limit = 10
-	}
-
-	rows, err := s.db.Query(ctx, `
-		SELECT r.id::text, r.name, COUNT(*)::int AS post_count
-		FROM posts p
-		JOIN rooms r ON r.id = p.room_id
-		WHERE p.persona_id = $1
-		  AND p.status = 'PUBLISHED'
-		GROUP BY r.id, r.name
-		ORDER BY post_count DESC, r.name ASC
-		LIMIT $2
-	`, personaID, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	rooms := make([]PublicRoomStat, 0, limit)
-	for rows.Next() {
-		var room PublicRoomStat
-		if err := rows.Scan(&room.RoomID, &room.RoomName, &room.PostCount); err != nil {
-			return nil, err
-		}
-		rooms = append(rooms, room)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return rooms, nil
-}
-
-func (s *Server) ensureUniquePublicProfileSlug(ctx context.Context, baseSlug, personaID string) (string, error) {
-	base := normalizePublicSlug(baseSlug)
-	if base == "" {
-		base = "persona"
-	}
-
-	candidate := base
-	for i := 0; i < 200; i++ {
-		var existingPersonaID string
-		err := s.db.QueryRow(ctx, `
-			SELECT persona_id::text
-			FROM persona_public_profiles
-			WHERE slug = $1
-		`, candidate).Scan(&existingPersonaID)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return candidate, nil
-		}
-		if err != nil {
-			return "", err
-		}
-		if strings.TrimSpace(existingPersonaID) == strings.TrimSpace(personaID) {
-			return candidate, nil
-		}
-		candidate = fmt.Sprintf("%s-%d", base, i+2)
-	}
-	return "", fmt.Errorf("could not allocate slug")
-}
-
-func normalizePublicSlug(value string) string {
-	raw := strings.ToLower(strings.TrimSpace(value))
-	if raw == "" {
-		return ""
-	}
-
-	var b strings.Builder
-	prevDash := false
-	for _, r := range raw {
-		isASCIIAlpha := r >= 'a' && r <= 'z'
-		isASCIIDigit := r >= '0' && r <= '9'
-		if isASCIIAlpha || isASCIIDigit {
-			b.WriteRune(r)
-			prevDash = false
-			continue
-		}
-
-		if unicode.IsSpace(r) || r == '-' || r == '_' {
-			if !prevDash && b.Len() > 0 {
-				b.WriteRune('-')
-				prevDash = true
-			}
-		}
-	}
-
-	slug := strings.Trim(b.String(), "-")
-	if len(slug) > 64 {
-		slug = strings.Trim(slug[:64], "-")
-	}
-	return slug
-}
-
-func buildPublicProfileBadges(profile PublicPersonaProfile) []string {
-	badges := []string{"Public Persona"}
-
-	language := strings.ToUpper(strings.TrimSpace(profile.PreferredLanguage))
-	if language != "" {
-		badges = append(badges, language)
-	}
-
-	tone := strings.TrimSpace(profile.Tone)
-	if tone != "" {
-		badges = append(badges, "Tone: "+tone)
-	}
-
-	if profile.Formality >= 2 {
-		badges = append(badges, "Formal")
-	} else {
-		badges = append(badges, "Conversational")
-	}
-	return badges
-}
-
-func buildPublicPostCursor(createdAt time.Time, postID string) string {
-	return fmt.Sprintf("%d|%s", createdAt.UTC().UnixNano(), strings.TrimSpace(postID))
-}
-
-func parsePublicPostCursor(cursor string) (time.Time, string, error) {
-	parts := strings.SplitN(strings.TrimSpace(cursor), "|", 2)
-	if len(parts) != 2 {
-		return time.Time{}, "", fmt.Errorf("invalid cursor")
-	}
-
-	nanos, err := strconv.ParseInt(parts[0], 10, 64)
-	if err != nil {
-		return time.Time{}, "", fmt.Errorf("invalid cursor")
-	}
-	postID := strings.TrimSpace(parts[1])
-	if postID == "" || len(postID) != 36 {
-		return time.Time{}, "", fmt.Errorf("invalid cursor")
-	}
-	return time.Unix(0, nanos).UTC(), postID, nil
-}
-
-func (s *Server) personaOwnedByUser(ctx context.Context, userID, personaID string) (bool, error) {
-	var exists bool
-	err := s.db.QueryRow(ctx, `
-		SELECT EXISTS(
-			SELECT 1
-			FROM personas
-			WHERE id = $1 AND user_id = $2
-		)
-	`, personaID, userID).Scan(&exists)
-	return exists, err
-}
-
-func (s *Server) getDigestForDate(ctx context.Context, personaID string, date time.Time) (PersonaDigest, bool, error) {
-	var (
-		digest PersonaDigest
-		stats  []byte
-		rawDay time.Time
-	)
-
-	err := s.db.QueryRow(ctx, `
-		SELECT persona_id::text, date, summary, stats, updated_at
-		FROM persona_digests
-		WHERE persona_id = $1
-		  AND date = $2::date
-	`, personaID, date.Format("2006-01-02")).Scan(&digest.PersonaID, &rawDay, &digest.Summary, &stats, &digest.UpdatedAt)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return PersonaDigest{}, false, nil
-		}
-		return PersonaDigest{}, false, err
-	}
-
-	digest.Date = rawDay.UTC().Format("2006-01-02")
-	if err := hydrateDigestStats(&digest, stats); err != nil {
-		return PersonaDigest{}, false, err
-	}
-	return digest, true, nil
-}
-
-func (s *Server) getLatestDigest(ctx context.Context, personaID string) (PersonaDigest, bool, error) {
-	var (
-		digest PersonaDigest
-		stats  []byte
-		rawDay time.Time
-	)
-
-	err := s.db.QueryRow(ctx, `
-		SELECT persona_id::text, date, summary, stats, updated_at
-		FROM persona_digests
-		WHERE persona_id = $1
-		ORDER BY date DESC
-		LIMIT 1
-	`, personaID).Scan(&digest.PersonaID, &rawDay, &digest.Summary, &stats, &digest.UpdatedAt)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return PersonaDigest{}, false, nil
-		}
-		return PersonaDigest{}, false, err
-	}
-
-	digest.Date = rawDay.UTC().Format("2006-01-02")
-	if err := hydrateDigestStats(&digest, stats); err != nil {
-		return PersonaDigest{}, false, err
-	}
-	return digest, true, nil
-}
-
-func hydrateDigestStats(digest *PersonaDigest, statsRaw []byte) error {
-	digest.Stats = DigestStats{
-		TopThreads: []DigestThread{},
-	}
-	if len(statsRaw) > 0 {
-		if err := json.Unmarshal(statsRaw, &digest.Stats); err != nil {
-			return err
-		}
-	}
-	if digest.Stats.TopThreads == nil {
-		digest.Stats.TopThreads = []DigestThread{}
-	}
-	digest.HasActivity = digest.Stats.Posts > 0 || digest.Stats.Replies > 0 || len(digest.Stats.TopThreads) > 0
-	if strings.TrimSpace(digest.Summary) == "" && !digest.HasActivity {
-		digest.Summary = "No activity yet today. Once the persona posts or replies, this digest will update."
-	}
-	return nil
-}
-
-func emptyDigest(personaID string, date time.Time) PersonaDigest {
-	return PersonaDigest{
-		PersonaID: personaID,
-		Date:      date.UTC().Format("2006-01-02"),
-		Summary:   "No activity yet today. Once the persona posts or replies, this digest will update.",
-		Stats: DigestStats{
-			Posts:      0,
-			Replies:    0,
-			TopThreads: []DigestThread{},
-		},
-		HasActivity: false,
-		UpdatedAt:   time.Now().UTC(),
-	}
-}
-
-func insertPersonaActivityEvent(ctx context.Context, executor dbExecutor, personaID, eventType string, metadata map[string]any) error {
-	if metadata == nil {
-		metadata = map[string]any{}
-	}
-	raw, err := json.Marshal(metadata)
-	if err != nil {
-		return err
-	}
-
-	_, err = executor.Exec(ctx, `
-		INSERT INTO persona_activity_events(persona_id, type, metadata)
-		VALUES ($1, $2, $3::jsonb)
-	`, personaID, eventType, raw)
-	return err
-}
-
-func truncateText(value string, maxRunes int) string {
-	trimmed := strings.TrimSpace(value)
-	if maxRunes <= 0 {
-		return trimmed
-	}
-
-	runes := []rune(trimmed)
-	if len(runes) <= maxRunes {
-		return trimmed
-	}
-	return strings.TrimSpace(string(runes[:maxRunes]))
-}
-
-type rowScanner interface {
-	Scan(dest ...any) error
-}
-
-type personaInput struct {
-	Name              string
-	Bio               string
-	Tone              string
-	WritingSamples    []string
-	DoNotSay          []string
-	Catchphrases      []string
-	PreferredLanguage string
-	Formality         int
-}
-
-func scanPersona(row rowScanner, p *Persona) error {
-	var writingSamplesRaw []byte
-	var doNotSayRaw []byte
-	var catchphrasesRaw []byte
-
-	if err := row.Scan(
-		&p.ID,
-		&p.Name,
-		&p.Bio,
-		&p.Tone,
-		&writingSamplesRaw,
-		&doNotSayRaw,
-		&catchphrasesRaw,
-		&p.PreferredLanguage,
-		&p.Formality,
-		&p.DailyDraftQuota,
-		&p.DailyReplyQuota,
-		&p.CreatedAt,
-		&p.UpdatedAt,
-	); err != nil {
-		return err
-	}
-
-	if len(writingSamplesRaw) > 0 {
-		if err := json.Unmarshal(writingSamplesRaw, &p.WritingSamples); err != nil {
-			return err
-		}
-	}
-	if len(doNotSayRaw) > 0 {
-		if err := json.Unmarshal(doNotSayRaw, &p.DoNotSay); err != nil {
-			return err
-		}
-	}
-	if len(catchphrasesRaw) > 0 {
-		if err := json.Unmarshal(catchphrasesRaw, &p.Catchphrases); err != nil {
-			return err
-		}
-	}
-
-	if p.WritingSamples == nil {
-		p.WritingSamples = []string{}
-	}
-	if p.DoNotSay == nil {
-		p.DoNotSay = []string{}
-	}
-	if p.Catchphrases == nil {
-		p.Catchphrases = []string{}
-	}
-	return nil
-}
-
-func normalizePersonaInput(name, bio, tone string, writingSamples, doNotSay, catchphrases []string, preferredLanguage string, formality int) (personaInput, error) {
-	cleanName := strings.TrimSpace(name)
-	if cleanName == "" {
-		return personaInput{}, fmt.Errorf("name is required")
-	}
-
-	cleanWritingSamples := normalizeStringSlice(writingSamples)
-	if len(cleanWritingSamples) != 3 {
-		return personaInput{}, fmt.Errorf("writing_samples must contain exactly 3 short examples")
-	}
-	for _, sample := range cleanWritingSamples {
-		if len([]rune(sample)) > 180 {
-			return personaInput{}, fmt.Errorf("writing_samples items must be <= 180 chars")
-		}
-	}
-
-	cleanDoNotSay := normalizeStringSlice(doNotSay)
-	for _, item := range cleanDoNotSay {
-		if len([]rune(item)) > 120 {
-			return personaInput{}, fmt.Errorf("do_not_say items must be <= 120 chars")
-		}
-	}
-
-	cleanCatchphrases := normalizeStringSlice(catchphrases)
-	for _, item := range cleanCatchphrases {
-		if len([]rune(item)) > 80 {
-			return personaInput{}, fmt.Errorf("catchphrases items must be <= 80 chars")
-		}
-	}
-
-	language := strings.ToLower(strings.TrimSpace(preferredLanguage))
-	if language != "tr" && language != "en" {
-		return personaInput{}, fmt.Errorf("preferred_language must be tr or en")
-	}
-
-	if formality < 0 || formality > 3 {
-		return personaInput{}, fmt.Errorf("formality must be between 0 and 3")
-	}
-
-	return personaInput{
-		Name:              cleanName,
-		Bio:               strings.TrimSpace(bio),
-		Tone:              strings.TrimSpace(tone),
-		WritingSamples:    cleanWritingSamples,
-		DoNotSay:          cleanDoNotSay,
-		Catchphrases:      cleanCatchphrases,
-		PreferredLanguage: language,
-		Formality:         formality,
-	}, nil
-}
-
-func normalizeStringSlice(items []string) []string {
-	cleaned := make([]string, 0, len(items))
-	for _, item := range items {
-		trimmed := strings.TrimSpace(item)
-		if trimmed != "" {
-			cleaned = append(cleaned, trimmed)
-		}
-	}
-	return cleaned
-}
-
-func personaToAIContext(persona Persona) ai.PersonaContext {
-	return ai.PersonaContext{
-		ID:                persona.ID,
-		Name:              persona.Name,
-		Bio:               persona.Bio,
-		Tone:              persona.Tone,
-		WritingSamples:    persona.WritingSamples,
-		DoNotSay:          persona.DoNotSay,
-		Catchphrases:      persona.Catchphrases,
-		PreferredLanguage: persona.PreferredLanguage,
-		Formality:         persona.Formality,
-	}
-}
-
-func decodeJSON(r *http.Request, dst any) error {
-	decoder := json.NewDecoder(r.Body)
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(dst); err != nil {
-		return err
-	}
-	if err := decoder.Decode(&struct{}{}); err != io.EOF {
-		return errors.New("request body must contain a single JSON object")
-	}
-	return nil
-}
-
-func decodeJSONAllowEmpty(r *http.Request, dst any) error {
-	decoder := json.NewDecoder(r.Body)
-	decoder.DisallowUnknownFields()
-	err := decoder.Decode(dst)
-	if errors.Is(err, io.EOF) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	if err := decoder.Decode(&struct{}{}); err != io.EOF {
-		return errors.New("request body must contain a single JSON object")
-	}
-	return nil
-}
-
-func writeJSON(w http.ResponseWriter, status int, payload any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(payload)
-}
-
-func writeError(w http.ResponseWriter, status int, message string) {
-	writeJSON(w, status, map[string]any{"error": message})
 }

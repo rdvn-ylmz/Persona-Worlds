@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"personaworlds/backend/internal/ai/prompts"
 	"strings"
 	"time"
 )
@@ -30,64 +31,78 @@ func NewOpenAIClient(apiKey, baseURL, model string) *OpenAIClient {
 }
 
 func (c *OpenAIClient) GeneratePostDraft(ctx context.Context, persona PersonaContext, room RoomContext) (string, error) {
-	system := "You create concise social posts for an AI persona. Keep output non-spam, no links, and no hashtag stuffing."
-	user := fmt.Sprintf(
-		"Persona: %s\nBio: %s\nTone: %s\nPreferred language: %s\nFormality (0 casual - 3 formal): %d\nWriting samples: %s\nDo not say list: %s\nCatchphrases: %s\nRoom: %s\nRoom Description: %s\nVariant: %d\nOutput rules: <= 90 words, exactly two sentences, first sentence has one practical insight, second sentence has one question. Avoid banned phrases and do not sound promotional.",
-		persona.Name,
-		persona.Bio,
-		persona.Tone,
-		persona.PreferredLanguage,
-		persona.Formality,
-		formatStringList(persona.WritingSamples),
-		formatStringList(persona.DoNotSay),
-		formatStringList(persona.Catchphrases),
-		room.Name,
-		room.Description,
-		room.Variant,
+	prompt := prompts.PostDraft(
+		prompts.Persona{
+			Name:              persona.Name,
+			Bio:               persona.Bio,
+			Tone:              persona.Tone,
+			WritingSamples:    persona.WritingSamples,
+			DoNotSay:          persona.DoNotSay,
+			Catchphrases:      persona.Catchphrases,
+			PreferredLanguage: persona.PreferredLanguage,
+			Formality:         persona.Formality,
+		},
+		prompts.Room{
+			Name:        room.Name,
+			Description: room.Description,
+			Variant:     room.Variant,
+		},
 	)
-	return c.chat(ctx, system, user)
+	return c.chat(ctx, prompt.System, prompt.User)
 }
 
 func (c *OpenAIClient) GenerateReply(ctx context.Context, persona PersonaContext, post PostContext, thread []ReplyContext) (string, error) {
-	var threadLines []string
-	for _, r := range thread {
-		threadLines = append(threadLines, r.Content)
+	promptThread := make([]prompts.ReplyItem, 0, len(thread))
+	for _, reply := range thread {
+		promptThread = append(promptThread, prompts.ReplyItem{Content: reply.Content})
 	}
-	system := "You create one short, constructive social reply for a persona."
-	user := fmt.Sprintf("Persona: %s\nBio: %s\nTone: %s\nPost: %s\nThread: %s\nGenerate one reply in <=90 words.", persona.Name, persona.Bio, persona.Tone, post.Content, strings.Join(threadLines, "\n- "))
-	return c.chat(ctx, system, user)
+
+	prompt := prompts.Reply(
+		prompts.Persona{
+			Name: persona.Name,
+			Bio:  persona.Bio,
+			Tone: persona.Tone,
+		},
+		prompts.Post{Content: post.Content},
+		promptThread,
+	)
+	return c.chat(ctx, prompt.System, prompt.User)
 }
 
 func (c *OpenAIClient) SummarizeThread(ctx context.Context, post PostContext, replies []ReplyContext) (string, error) {
-	var parts []string
+	promptReplies := make([]prompts.ReplyItem, 0, len(replies))
 	for _, reply := range replies {
-		parts = append(parts, reply.Content)
+		promptReplies = append(promptReplies, prompts.ReplyItem{Content: reply.Content})
 	}
-	system := "You summarize threads in a few bullet-like sentences with neutral tone."
-	user := fmt.Sprintf("Post: %s\nReplies: %s\nProvide a compact summary in <=120 words.", post.Content, strings.Join(parts, "\n- "))
-	return c.chat(ctx, system, user)
+
+	prompt := prompts.ThreadSummary(prompts.Post{Content: post.Content}, promptReplies)
+	return c.chat(ctx, prompt.System, prompt.User)
 }
 
 func (c *OpenAIClient) SummarizePersonaActivity(ctx context.Context, persona PersonaContext, stats DigestStats, threads []DigestThreadContext) (string, error) {
-	threadLines := make([]string, 0, len(threads))
+	promptThreads := make([]prompts.DigestThread, 0, len(threads))
 	for _, thread := range threads {
-		threadLines = append(threadLines, fmt.Sprintf("post_id=%s | room=%s | activity=%d | preview=%s", thread.PostID, thread.RoomName, thread.ActivityCount, thread.PostPreview))
-	}
-	if len(threadLines) == 0 {
-		threadLines = append(threadLines, "No active threads")
+		promptThreads = append(promptThreads, prompts.DigestThread{
+			PostID:        thread.PostID,
+			RoomName:      thread.RoomName,
+			PostPreview:   thread.PostPreview,
+			ActivityCount: thread.ActivityCount,
+		})
 	}
 
-	system := "You write one concise digest paragraph describing what happened while the user was away."
-	user := fmt.Sprintf(
-		"Persona: %s\nTone: %s\nPreferred language: %s\nStats today: posts=%d, replies=%d\nTop threads: %s\nOutput rules: 1 paragraph, <=120 words, concrete and neutral, mention thread themes.",
-		persona.Name,
-		persona.Tone,
-		persona.PreferredLanguage,
-		stats.Posts,
-		stats.Replies,
-		strings.Join(threadLines, "\n- "),
+	prompt := prompts.PersonaActivitySummary(
+		prompts.Persona{
+			Name:              persona.Name,
+			Tone:              persona.Tone,
+			PreferredLanguage: persona.PreferredLanguage,
+		},
+		prompts.DigestStats{
+			Posts:   stats.Posts,
+			Replies: stats.Replies,
+		},
+		promptThreads,
 	)
-	return c.chat(ctx, system, user)
+	return c.chat(ctx, prompt.System, prompt.User)
 }
 
 func (c *OpenAIClient) endpoint() string {
@@ -152,11 +167,4 @@ func (c *OpenAIClient) chat(ctx context.Context, system, user string) (string, e
 		return "", errors.New("openai provider returned empty content")
 	}
 	return content, nil
-}
-
-func formatStringList(items []string) string {
-	if len(items) == 0 {
-		return "none"
-	}
-	return strings.Join(items, " | ")
 }
