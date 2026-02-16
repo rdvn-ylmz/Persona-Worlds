@@ -2,9 +2,8 @@ package main
 
 import (
 	"context"
-	"fmt"
-	"log"
 	"net/http"
+	"os"
 	"os/signal"
 	"syscall"
 	"time"
@@ -13,22 +12,32 @@ import (
 	"personaworlds/backend/internal/api"
 	"personaworlds/backend/internal/config"
 	"personaworlds/backend/internal/db"
+	"personaworlds/backend/internal/observability"
 )
 
 func main() {
 	cfg := config.Load()
+	logger := observability.NewLogger("api")
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	pool, err := db.Connect(ctx, cfg.DatabaseURL)
 	if err != nil {
-		log.Fatalf("db connect failed: %v", err)
+		logger.Error("startup_failed", observability.Fields{
+			"step":  "db_connect",
+			"error": err.Error(),
+		})
+		os.Exit(1)
 	}
 	defer pool.Close()
 
 	if err := db.RunMigrations(ctx, pool, cfg.MigrationsDir); err != nil {
-		log.Fatalf("migration failed: %v", err)
+		logger.Error("startup_failed", observability.Fields{
+			"step":  "run_migrations",
+			"error": err.Error(),
+		})
+		os.Exit(1)
 	}
 
 	llm := ai.NewFromConfig(cfg)
@@ -39,20 +48,29 @@ func main() {
 		Handler:           server.Router(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
+	serverErrCh := make(chan error, 1)
 
 	go func() {
-		log.Printf("api listening on :%s", cfg.Port)
+		logger.Info("api_listening", observability.Fields{
+			"addr": ":" + cfg.Port,
+		})
 		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("http server failed: %v", err)
+			serverErrCh <- err
 		}
 	}()
 
-	<-ctx.Done()
+	select {
+	case <-ctx.Done():
+	case err := <-serverErrCh:
+		logger.Error("http_server_failed", observability.Fields{"error": err.Error()})
+		stop()
+	}
+
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
-		log.Printf("graceful shutdown failed: %v", err)
+		logger.Error("graceful_shutdown_failed", observability.Fields{"error": err.Error()})
 	}
-	fmt.Println("api stopped")
+	logger.Info("api_stopped", nil)
 }

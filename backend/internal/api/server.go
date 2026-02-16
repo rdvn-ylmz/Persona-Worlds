@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -13,6 +14,7 @@ import (
 	"personaworlds/backend/internal/auth"
 	"personaworlds/backend/internal/common"
 	"personaworlds/backend/internal/config"
+	"personaworlds/backend/internal/observability"
 	"personaworlds/backend/internal/safety"
 
 	"github.com/go-chi/chi/v5"
@@ -27,6 +29,8 @@ type Server struct {
 	cfg                config.Config
 	db                 *pgxpool.Pool
 	llm                ai.LLMClient
+	logger             *observability.Logger
+	metrics            *observability.APIMetrics
 	publicReadLimiter  *ipRateLimiter
 	publicWriteLimiter *ipRateLimiter
 	battleCardCache    *battleCardCache
@@ -167,6 +171,8 @@ func New(cfg config.Config, db *pgxpool.Pool, llm ai.LLMClient) *Server {
 		cfg:                cfg,
 		db:                 db,
 		llm:                llm,
+		logger:             observability.NewLogger("api"),
+		metrics:            observability.NewAPIMetrics(),
 		publicReadLimiter:  newIPRateLimiter(120, time.Minute),
 		publicWriteLimiter: newIPRateLimiter(30, time.Minute),
 		battleCardCache:    newBattleCardCache(256),
@@ -248,9 +254,9 @@ func (s *Server) Router() http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
+	r.Use(s.requestObservabilityMiddleware)
 	r.Use(s.eventLoggingMiddleware)
-	r.Use(middleware.Logger)
-	r.Use(middleware.Recoverer)
+	r.Use(s.recoverJSONMiddleware)
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   []string{s.cfg.FrontendOrigin, "http://localhost:3000"},
 		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
@@ -259,9 +265,9 @@ func (s *Server) Router() http.Handler {
 		MaxAge:           300,
 	}))
 
-	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
-	})
+	r.Get("/healthz", s.handleHealthz)
+	r.Get("/readyz", s.handleReadyz)
+	r.Get("/metrics", s.handleMetrics)
 
 	r.Post("/events", s.handleCreateEvent)
 
@@ -1351,7 +1357,18 @@ func (s *Server) handleGenerateReplies(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		payload := fmt.Sprintf(`{"post_id":"%s","persona_id":"%s"}`, postID, personaID)
+		payloadMap := map[string]any{
+			"post_id":    postID,
+			"persona_id": personaID,
+		}
+		if traceID := strings.TrimSpace(requestIDFromRequest(r)); traceID != "" {
+			payloadMap["trace_id"] = traceID
+		}
+		payload, err := json.Marshal(payloadMap)
+		if err != nil {
+			skipped++
+			continue
+		}
 		if _, err := s.db.Exec(r.Context(), `
 			INSERT INTO jobs(job_type, post_id, persona_id, payload, status, available_at)
 			VALUES ('generate_reply', $1, $2, $3::jsonb, 'PENDING', NOW())

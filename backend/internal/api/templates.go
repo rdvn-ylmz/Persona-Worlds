@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -363,7 +364,7 @@ func (s *Server) handleCreateBattle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	enqueuedReplies := s.enqueueBattleReplies(r.Context(), userID, out.ID, template)
+	enqueuedReplies := s.enqueueBattleReplies(r.Context(), userID, out.ID, template, requestIDFromRequest(r))
 
 	_ = s.notifyTemplateUsed(r.Context(), userID, template, out.ID)
 	if remixUsed {
@@ -395,7 +396,7 @@ func (s *Server) handleCreateBattle(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) enqueueBattleReplies(ctx context.Context, userID, postID string, template BattleTemplate) int {
+func (s *Server) enqueueBattleReplies(ctx context.Context, userID, postID string, template BattleTemplate, traceID string) int {
 	personaIDs, err := s.resolvePersonaIDsForReplyGeneration(ctx, userID, nil)
 	if err != nil || len(personaIDs) == 0 {
 		return 0
@@ -420,7 +421,18 @@ func (s *Server) enqueueBattleReplies(ctx context.Context, userID, postID string
 			continue
 		}
 
-		payload := fmt.Sprintf(`{"post_id":"%s","persona_id":"%s","template_id":"%s"}`, postID, personaID, template.ID)
+		payloadMap := map[string]any{
+			"post_id":     postID,
+			"persona_id":  personaID,
+			"template_id": template.ID,
+		}
+		if strings.TrimSpace(traceID) != "" {
+			payloadMap["trace_id"] = strings.TrimSpace(traceID)
+		}
+		payload, err := json.Marshal(payloadMap)
+		if err != nil {
+			continue
+		}
 		if _, err := s.db.Exec(ctx, `
 			INSERT INTO jobs(job_type, post_id, persona_id, payload, status, available_at)
 			VALUES ('generate_reply', $1, $2, $3::jsonb, 'PENDING', NOW())
