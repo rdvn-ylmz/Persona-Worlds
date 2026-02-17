@@ -3,14 +3,10 @@
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import { useEffect, useMemo, useState } from 'react';
-import {
-  PublicPersonaPost,
-  PublicPersonaProfileResponse,
-  followPublicPersona,
-  getPublicPersonaPosts,
-  getPublicPersonaProfile,
-  trackEvent
-} from '../../../lib/api';
+import { PublicPersonaPost, PublicPersonaProfileResponse, followPublicPersona, getPublicPersonaPosts, getPublicPersonaProfile, trackEvent } from '../../../lib/api';
+import { SkeletonList } from '../../../components/skeleton';
+import { Spinner } from '../../../components/spinner';
+import { useToast } from '../../../components/toast-provider';
 
 const TOKEN_KEY = 'personaworlds_token';
 const SHARE_SLUG_KEY = 'personaworlds_share_slug';
@@ -26,6 +22,7 @@ function publicPostBadge(post: PublicPersonaPost) {
 }
 
 export default function PublicPersonaPage() {
+  const toast = useToast();
   const params = useParams<{ slug: string }>();
   const slug = useMemo(() => (params?.slug || '').toString().trim(), [params]);
 
@@ -61,7 +58,9 @@ export default function PublicPersonaPage() {
         localStorage.setItem(SHARE_SLUG_KEY, profileSlug);
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'could not load profile');
+      const messageText = err instanceof Error ? err.message : 'could not load profile';
+      setError(messageText);
+      toast.error(messageText);
     } finally {
       setLoading(false);
     }
@@ -79,7 +78,9 @@ export default function PublicPersonaPage() {
       setPosts((current) => [...current, ...response.posts]);
       setNextCursor(response.next_cursor || '');
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'could not load more posts');
+      const messageText = err instanceof Error ? err.message : 'could not load more posts';
+      setError(messageText);
+      toast.error(messageText);
     } finally {
       setLoadingMore(false);
     }
@@ -116,13 +117,18 @@ export default function PublicPersonaPage() {
           }
         };
       });
-      setMessage(response.followed ? 'You are now following this persona.' : 'You already follow this persona.');
+      const text = response.followed ? 'You are now following this persona.' : 'You already follow this persona.';
+      setMessage(text);
+      toast.success(text);
     } catch (err) {
       const messageText = err instanceof Error ? err.message : 'follow failed';
       if (messageText.includes('signup_required')) {
-        setError('Signup required to follow personas. Create your own persona to join.');
+        const text = 'Signup required to follow personas. Create your own persona to join.';
+        setError(text);
+        toast.error(text);
       } else {
         setError(messageText);
+        toast.error(messageText);
       }
     } finally {
       setFollowing(false);
@@ -134,7 +140,7 @@ export default function PublicPersonaPage() {
       <main className="container">
         <section className="panel public-panel stack">
           <h1>Public Persona</h1>
-          <p className="subtle">Loading profile...</p>
+          <SkeletonList rows={2} />
         </section>
       </main>
     );
@@ -184,7 +190,10 @@ export default function PublicPersonaPage() {
           </div>
           <div className="public-actions stack">
             <button onClick={onFollow} disabled={following}>
-              {following ? 'Following...' : 'Follow'}
+              <span className="button-content">
+                {following && <Spinner />}
+                <span>{following ? 'Following...' : 'Follow'}</span>
+              </span>
             </button>
             <Link className="cta-link" href="/" onClick={onRemixClick}>
               Create your own persona
@@ -240,7 +249,10 @@ export default function PublicPersonaPage() {
 
           {nextCursor && (
             <button className="secondary" onClick={loadMorePosts} disabled={loadingMore}>
-              {loadingMore ? 'Loading...' : 'Load More'}
+              <span className="button-content">
+                {loadingMore && <Spinner />}
+                <span>{loadingMore ? 'Loading...' : 'Load More'}</span>
+              </span>
             </button>
           )}
         </div>

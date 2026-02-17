@@ -8,17 +8,29 @@ import {
   RemixIntentResponse,
   createBattle,
   createBattleRemixIntent,
+  getAPIBaseURL,
   getPublicBattleMeta,
+  pollBattleProgress,
   trackEvent
 } from '../../../lib/api';
+import { SkeletonList } from '../../../components/skeleton';
+import { Spinner } from '../../../components/spinner';
+import { useToast } from '../../../components/toast-provider';
 
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8080';
+const API_BASE = getAPIBaseURL();
 const TOKEN_KEY = 'personaworlds_token';
 const REMIX_INTENT_KEY = 'personaworlds_pending_remix_intent';
 const PREFERRED_TEMPLATE_KEY = 'personaworlds_preferred_template_id';
 
 type StoredRemixIntent = RemixIntentResponse & {
   saved_at: string;
+};
+
+type RemixProgress = {
+  battleId: string;
+  expectedReplies: number;
+  repliesCount: number;
+  status: 'RUNNING' | 'TIMEOUT';
 };
 
 function getStoredToken() {
@@ -102,6 +114,7 @@ function downloadBlob(blob: Blob, filename: string) {
 }
 
 export default function BattleCardPage() {
+  const toast = useToast();
   const params = useParams<{ id: string }>();
   const searchParams = useSearchParams();
   const battleID = useMemo(() => (params?.id || '').toString().trim(), [params]);
@@ -115,8 +128,10 @@ export default function BattleCardPage() {
   const [working, setWorking] = useState(false);
   const [sharing, setSharing] = useState(false);
   const [submittingRemix, setSubmittingRemix] = useState(false);
+  const [checkingRemixStatus, setCheckingRemixStatus] = useState(false);
   const [showRemixModal, setShowRemixModal] = useState(false);
   const [autoRemixChecked, setAutoRemixChecked] = useState(false);
+  const [remixProgress, setRemixProgress] = useState<RemixProgress | null>(null);
 
   const [topic, setTopic] = useState('');
   const [proStyle, setProStyle] = useState('');
@@ -157,7 +172,9 @@ export default function BattleCardPage() {
         }
       } catch (err) {
         if (!cancelled) {
-          setError(err instanceof Error ? err.message : 'could not load battle');
+          const messageText = err instanceof Error ? err.message : 'could not load battle';
+          setError(messageText);
+          toast.error(messageText);
         }
       } finally {
         if (!cancelled) {
@@ -170,7 +187,7 @@ export default function BattleCardPage() {
     return () => {
       cancelled = true;
     };
-  }, [battleID]);
+  }, [battleID, toast]);
 
   useEffect(() => {
     if (autoRemixChecked) {
@@ -256,6 +273,7 @@ export default function BattleCardPage() {
       }
 
       applyRemixIntent(intent, true, options.preferredTemplateID || '');
+      toast.info('Remix prefill loaded.');
       void trackEvent(
         'remix_started',
         {
@@ -265,7 +283,9 @@ export default function BattleCardPage() {
         token || undefined
       ).catch(() => undefined);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'could not start remix');
+      const messageText = err instanceof Error ? err.message : 'could not start remix';
+      setError(messageText);
+      toast.error(messageText);
     } finally {
       setWorking(false);
     }
@@ -281,8 +301,7 @@ export default function BattleCardPage() {
       setMessage('');
 
       const blob = await loadBattleCardBlob(cardURL);
-      const hasClipboardImageSupport =
-        typeof window !== 'undefined' && 'ClipboardItem' in window && Boolean(navigator.clipboard?.write);
+      const hasClipboardImageSupport = typeof window !== 'undefined' && 'ClipboardItem' in window && Boolean(navigator.clipboard?.write);
 
       if (hasClipboardImageSupport) {
         const item = new (window as any).ClipboardItem({
@@ -290,9 +309,11 @@ export default function BattleCardPage() {
         });
         await navigator.clipboard.write([item]);
         setMessage('Battle card image copied to clipboard.');
+        toast.success('Battle card image copied.');
       } else {
         downloadBlob(blob, `battle-${battleID}.png`);
-        setMessage('Clipboard image is unavailable, card downloaded instead.');
+        setMessage('Clipboard image unavailable, downloaded instead.');
+        toast.info('Image downloaded.');
       }
 
       void trackEvent(
@@ -304,7 +325,9 @@ export default function BattleCardPage() {
         token || undefined
       ).catch(() => undefined);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'could not copy battle card image');
+      const messageText = err instanceof Error ? err.message : 'could not copy battle card image';
+      setError(messageText);
+      toast.error(messageText);
     } finally {
       setSharing(false);
     }
@@ -338,7 +361,7 @@ export default function BattleCardPage() {
             shared = true;
           }
         } catch {
-          // Fall back to URL share.
+          // Fallback to URL share.
         }
 
         if (!shared) {
@@ -350,11 +373,14 @@ export default function BattleCardPage() {
         }
 
         setMessage('Share dialog opened.');
+        toast.success('Share dialog opened.');
       } else if (navigator.clipboard?.writeText) {
         await navigator.clipboard.writeText(shareURL);
-        setMessage('Share is not supported here, battle link copied instead.');
+        setMessage('Share unavailable here, link copied instead.');
+        toast.info('Link copied.');
       } else {
         setError('Share is unavailable in this browser.');
+        toast.error('Share is unavailable in this browser.');
         return;
       }
 
@@ -367,14 +393,16 @@ export default function BattleCardPage() {
         token || undefined
       ).catch(() => undefined);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'could not share battle card');
+      const messageText = err instanceof Error ? err.message : 'could not share battle card';
+      setError(messageText);
+      toast.error(messageText);
     } finally {
       setSharing(false);
     }
   }
 
   async function onCopyLink() {
-    if (!battleID || !battleURL || !navigator.clipboard?.writeText) {
+    if (!battleID || !battleURL) {
       return;
     }
 
@@ -382,8 +410,15 @@ export default function BattleCardPage() {
       setSharing(true);
       setError('');
       setMessage('');
-      await navigator.clipboard.writeText(battleURL);
-      setMessage('Battle link copied.');
+
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(battleURL);
+        setMessage('Battle link copied.');
+        toast.success('Battle link copied.');
+      } else {
+        window.prompt('Copy this battle link', battleURL);
+        toast.info('Copy link manually from the prompt.');
+      }
 
       void trackEvent(
         'battle_shared',
@@ -394,7 +429,9 @@ export default function BattleCardPage() {
         token || undefined
       ).catch(() => undefined);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'could not copy link');
+      const messageText = err instanceof Error ? err.message : 'could not copy link';
+      setError(messageText);
+      toast.error(messageText);
     } finally {
       setSharing(false);
     }
@@ -406,6 +443,7 @@ export default function BattleCardPage() {
     }
     if (!remixIntent) {
       setError('remix intent missing, retry remix');
+      toast.error('Remix intent missing. Retry remix.');
       return;
     }
     if (!token) {
@@ -416,6 +454,7 @@ export default function BattleCardPage() {
     }
     if (!topic.trim()) {
       setError('topic is required');
+      toast.error('Topic is required.');
       return;
     }
 
@@ -432,24 +471,79 @@ export default function BattleCardPage() {
         con_style: conStyle.trim()
       });
 
-      void trackEvent(
-        'remix_completed',
-        {
-          source_battle_id: battleID,
-          battle_id: created.battle_id,
-          room_id: remixIntent.room_id
-        },
-        token
-      ).catch(() => undefined);
+      setRemixProgress({
+        battleId: created.battle_id,
+        expectedReplies: created.enqueued_replies,
+        repliesCount: 0,
+        status: 'RUNNING'
+      });
+      toast.info(`Battle created. Generating ${created.enqueued_replies} replies...`);
 
-      clearStoredRemixIntent();
-      clearPreferredTemplateID();
-      setShowRemixModal(false);
-      window.location.href = `/b/${encodeURIComponent(created.battle_id)}`;
+      const result = await pollBattleProgress(token, created.battle_id, created.enqueued_replies, { maxWaitMs: 30000 });
+
+      if (result.done) {
+        void trackEvent(
+          'remix_completed',
+          {
+            source_battle_id: battleID,
+            battle_id: created.battle_id,
+            room_id: remixIntent.room_id
+          },
+          token
+        ).catch(() => undefined);
+
+        clearStoredRemixIntent();
+        clearPreferredTemplateID();
+        setShowRemixModal(false);
+        toast.success('Remixed battle is ready. Redirecting...');
+        window.location.href = `/b/${encodeURIComponent(created.battle_id)}`;
+        return;
+      }
+
+      setRemixProgress({
+        battleId: created.battle_id,
+        expectedReplies: result.latest.expected_replies,
+        repliesCount: result.latest.replies_count,
+        status: 'TIMEOUT'
+      });
+      setMessage(`Battle created. Replies are still generating (${result.latest.replies_count}/${result.latest.expected_replies}).`);
+      toast.info('Still generating. Use refresh status.');
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'could not complete remix');
+      const messageText = err instanceof Error ? err.message : 'could not complete remix';
+      setError(messageText);
+      toast.error(messageText);
     } finally {
       setSubmittingRemix(false);
+    }
+  }
+
+  async function onRefreshRemixStatus() {
+    if (!token || !remixProgress) {
+      return;
+    }
+
+    try {
+      setCheckingRemixStatus(true);
+      setError('');
+      const result = await pollBattleProgress(token, remixProgress.battleId, remixProgress.expectedReplies, { maxWaitMs: 15000 });
+      if (result.done) {
+        toast.success('Battle is ready. Redirecting...');
+        window.location.href = `/b/${encodeURIComponent(remixProgress.battleId)}`;
+        return;
+      }
+      setRemixProgress({
+        battleId: remixProgress.battleId,
+        expectedReplies: result.latest.expected_replies,
+        repliesCount: result.latest.replies_count,
+        status: 'TIMEOUT'
+      });
+      toast.info(`Still generating (${result.latest.replies_count}/${result.latest.expected_replies}).`);
+    } catch (err) {
+      const messageText = err instanceof Error ? err.message : 'could not refresh remix status';
+      setError(messageText);
+      toast.error(messageText);
+    } finally {
+      setCheckingRemixStatus(false);
     }
   }
 
@@ -474,7 +568,7 @@ export default function BattleCardPage() {
           <div className="stack">
             <h1>Battle</h1>
             <p className="subtle">Battle ID: {battleID}</p>
-            {loadingMeta && <p className="subtle">Loading battle details...</p>}
+            {loadingMeta && <SkeletonList rows={2} />}
             {!loadingMeta && meta && (
               <>
                 <p>{meta.topic}</p>
@@ -507,7 +601,10 @@ export default function BattleCardPage() {
             }
             disabled={working}
           >
-            Remix this battle
+            <span className="button-content">
+              {working && <Spinner />}
+              <span>Remix this battle</span>
+            </span>
           </button>
           {meta?.template && (
             <button
@@ -521,24 +618,58 @@ export default function BattleCardPage() {
               }
               disabled={working}
             >
-              Use this template
+              <span className="button-content">
+                {working && <Spinner />}
+                <span>Use this template</span>
+              </span>
             </button>
           )}
           <button type="button" className="secondary" onClick={onCopyImage} disabled={sharing}>
-            Copy image
+            <span className="button-content">
+              {sharing && <Spinner />}
+              <span>Copy image</span>
+            </span>
           </button>
           <button type="button" className="secondary" onClick={onShare} disabled={sharing}>
-            Share
+            <span className="button-content">
+              {sharing && <Spinner />}
+              <span>Share</span>
+            </span>
           </button>
           <button type="button" className="secondary" onClick={onCopyLink} disabled={sharing || !battleURL}>
-            Copy link
+            <span className="button-content">
+              {sharing && <Spinner />}
+              <span>Copy link</span>
+            </span>
           </button>
         </div>
 
+        {remixProgress && (
+          <article className="mini-card stack">
+            <strong>Remix generation</strong>
+            <p className="subtle">Battle: {remixProgress.battleId}</p>
+            <p className="subtle">
+              Replies: {remixProgress.repliesCount}/{remixProgress.expectedReplies}
+            </p>
+            {remixProgress.status === 'RUNNING' && (
+              <p className="button-content subtle">
+                <Spinner />
+                <span>Generating...</span>
+              </p>
+            )}
+            {remixProgress.status === 'TIMEOUT' && (
+              <button type="button" className="secondary" onClick={onRefreshRemixStatus} disabled={checkingRemixStatus}>
+                <span className="button-content">
+                  {checkingRemixStatus && <Spinner />}
+                  <span>Refresh status</span>
+                </span>
+              </button>
+            )}
+          </article>
+        )}
+
         <div className="battle-card-preview">
-          {!previewError && (
-            <img src={cardURL} alt="Battle card preview" loading="lazy" onError={() => setPreviewError(true)} />
-          )}
+          {!previewError && <img src={cardURL} alt="Battle card preview" loading="lazy" onError={() => setPreviewError(true)} />}
           {previewError && (
             <p className="error">
               Could not load preview. You can still download directly from <code>/b/{battleID}/card.png</code>.
@@ -583,7 +714,10 @@ export default function BattleCardPage() {
             </label>
             <div className="row">
               <button type="button" onClick={onSubmitRemix} disabled={submittingRemix}>
-                {submittingRemix ? 'Creating...' : 'Create remixed battle'}
+                <span className="button-content">
+                  {submittingRemix && <Spinner />}
+                  <span>{submittingRemix ? 'Creating...' : 'Create remixed battle'}</span>
+                </span>
               </button>
               <button type="button" className="secondary" onClick={() => setShowRemixModal(false)} disabled={submittingRemix}>
                 Cancel

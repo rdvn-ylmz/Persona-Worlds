@@ -4,11 +4,14 @@ import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 import { FormEvent, Suspense, useMemo, useState } from 'react';
 import { login, signup } from '../../lib/api';
+import { Spinner } from '../../components/spinner';
+import { useToast } from '../../components/toast-provider';
 
 const TOKEN_KEY = 'personaworlds_token';
 const SHARE_SLUG_KEY = 'personaworlds_share_slug';
 
 function SignupPageContent() {
+  const toast = useToast();
   const searchParams = useSearchParams();
   const [isSignup, setIsSignup] = useState(true);
   const [email, setEmail] = useState('');
@@ -41,9 +44,12 @@ function SignupPageContent() {
         localStorage.removeItem(SHARE_SLUG_KEY);
       }
       setMessage(isSignup ? 'Account created, redirecting...' : 'Logged in, redirecting...');
+      toast.success(isSignup ? 'Account created.' : 'Logged in.');
       window.location.href = redirectPath || '/';
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'auth failed');
+      const messageText = err instanceof Error ? err.message : 'auth failed';
+      setError(messageText);
+      toast.error(messageText);
     } finally {
       setLoading(false);
     }
@@ -65,7 +71,10 @@ function SignupPageContent() {
             required
           />
           <button type="submit" disabled={loading}>
-            {loading ? 'Please wait...' : isSignup ? 'Sign up' : 'Log in'}
+            <span className="button-content">
+              {loading && <Spinner />}
+              <span>{loading ? 'Please wait...' : isSignup ? 'Sign up' : 'Log in'}</span>
+            </span>
           </button>
         </form>
 
