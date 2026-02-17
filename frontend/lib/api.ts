@@ -1,11 +1,84 @@
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8080';
+const API_BASE = (process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8080').replace(/\/+$/, '');
 
 type RequestOptions = {
   method?: string;
   token?: string;
   body?: unknown;
   keepalive?: boolean;
+  skipAuthRedirect?: boolean;
 };
+
+type APIErrorPayload = {
+  error?: string;
+  message?: string;
+  code?: string;
+};
+
+export class APIError extends Error {
+  status: number;
+  code: string;
+
+  constructor(message: string, status: number, code = 'api_error') {
+    super(message);
+    this.name = 'APIError';
+    this.status = status;
+    this.code = code;
+  }
+}
+
+function getNextPathForRedirect() {
+  if (typeof window === 'undefined') {
+    return '/';
+  }
+  const path = `${window.location.pathname || '/'}${window.location.search || ''}${window.location.hash || ''}`.trim();
+  return path || '/';
+}
+
+function redirectToLoginWithNext(nextPath: string) {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  const nextValue = nextPath.trim() || '/';
+  window.location.href = `/signup?next=${encodeURIComponent(nextValue)}`;
+}
+
+async function parseResponseBody(response: Response): Promise<unknown> {
+  const contentType = (response.headers.get('Content-Type') || '').toLowerCase();
+  if (contentType.includes('application/json')) {
+    return response.json().catch(() => ({}));
+  }
+
+  const text = await response.text().catch(() => '');
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return {};
+  }
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return { message: trimmed };
+  }
+}
+
+function extractAPIError(payload: unknown, status: number) {
+  const body = (payload && typeof payload === 'object' ? payload : {}) as APIErrorPayload;
+  const message = (body.error || body.message || '').trim() || `request failed with status ${status}`;
+  const code = (body.code || '').trim() || `http_${status}`;
+  return new APIError(message, status, code);
+}
+
+function handleUnauthorizedRedirect(path: string, options: RequestOptions, status: number) {
+  if (status !== 401 || options.skipAuthRedirect) {
+    return;
+  }
+  if (!options.token) {
+    return;
+  }
+  if (path.startsWith('/auth/')) {
+    return;
+  }
+  redirectToLoginWithNext(getNextPathForRedirect());
+}
 
 async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
@@ -18,11 +91,22 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
     body: options.body ? JSON.stringify(options.body) : undefined
   });
 
-  const data = await response.json().catch(() => ({}));
+  const data = await parseResponseBody(response);
   if (!response.ok) {
-    throw new Error(data.error || `request failed with status ${response.status}`);
+    handleUnauthorizedRedirect(path, options, response.status);
+    throw extractAPIError(data, response.status);
   }
   return data as T;
+}
+
+function sleep(ms: number) {
+  return new Promise<void>((resolve) => {
+    setTimeout(resolve, Math.max(0, ms));
+  });
+}
+
+export function getAPIBaseURL() {
+  return API_BASE;
 }
 
 export type Persona = {
@@ -89,6 +173,29 @@ export type ThreadResponse = {
   post: Post;
   replies: Reply[];
   ai_summary: string;
+};
+
+export type BattleProgress = {
+  battle_id: string;
+  status: 'PENDING' | 'DONE';
+  done: boolean;
+  replies_count: number;
+  expected_replies: number;
+  thread: ThreadResponse;
+};
+
+export type BattlePollOptions = {
+  maxWaitMs?: number;
+  initialDelayMs?: number;
+  maxDelayMs?: number;
+  factor?: number;
+};
+
+export type BattlePollResult = {
+  done: boolean;
+  timed_out: boolean;
+  elapsed_ms: number;
+  latest: BattleProgress;
 };
 
 export type PreviewResponse = {
@@ -529,6 +636,55 @@ export async function generateReplies(token: string, postId: string, personaIds:
 
 export async function getThread(token: string, postId: string) {
   return request<ThreadResponse>(`/posts/${postId}/thread`, { token });
+}
+
+export async function getBattleProgress(token: string, battleId: string, expectedReplies = 0) {
+  const normalizedExpected = Math.max(0, expectedReplies);
+  const thread = await getThread(token, battleId);
+  const repliesCount = thread.replies?.length || 0;
+  const done = normalizedExpected === 0 || repliesCount >= normalizedExpected;
+  return {
+    battle_id: battleId,
+    status: done ? 'DONE' : 'PENDING',
+    done,
+    replies_count: repliesCount,
+    expected_replies: normalizedExpected,
+    thread
+  } satisfies BattleProgress;
+}
+
+export async function pollBattleProgress(
+  token: string,
+  battleId: string,
+  expectedReplies = 0,
+  options: BattlePollOptions = {}
+) {
+  const maxWaitMs = options.maxWaitMs && options.maxWaitMs > 0 ? options.maxWaitMs : 30000;
+  const initialDelayMs = options.initialDelayMs && options.initialDelayMs > 0 ? options.initialDelayMs : 1000;
+  const maxDelayMs = options.maxDelayMs && options.maxDelayMs > 0 ? options.maxDelayMs : 5000;
+  const factor = options.factor && options.factor > 1 ? options.factor : 1.6;
+
+  const startedAt = Date.now();
+  const deadline = startedAt + maxWaitMs;
+  let delayMs = initialDelayMs;
+
+  let latest = await getBattleProgress(token, battleId, expectedReplies);
+  while (!latest.done && Date.now() < deadline) {
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) {
+      break;
+    }
+    await sleep(Math.min(delayMs, remainingMs));
+    delayMs = Math.min(maxDelayMs, Math.round(delayMs * factor));
+    latest = await getBattleProgress(token, battleId, expectedReplies);
+  }
+
+  return {
+    done: latest.done,
+    timed_out: !latest.done,
+    elapsed_ms: Date.now() - startedAt,
+    latest
+  } satisfies BattlePollResult;
 }
 
 export async function trackEvent(eventName: string, metadata: Record<string, unknown> = {}, token?: string) {
