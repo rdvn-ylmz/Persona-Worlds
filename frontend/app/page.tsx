@@ -3,6 +3,7 @@
 import { FormEvent, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import {
+  BattlePollResult,
   DigestThread,
   FeedItem,
   FeedTemplateItem,
@@ -32,16 +33,22 @@ import {
   markAllNotificationsRead,
   markNotificationRead,
   login,
+  pollBattleProgress,
   publishPersonaProfile,
+  unpublishPersonaProfile,
   previewPersona,
   trackEvent,
   signup,
   updatePersona
 } from '../lib/api';
+import { Spinner } from '../components/spinner';
+import { SkeletonList } from '../components/skeleton';
+import { useToast } from '../components/toast-provider';
 
 const TOKEN_KEY = 'personaworlds_token';
 const SHARE_SLUG_KEY = 'personaworlds_share_slug';
 const DAILY_RETURN_KEY_PREFIX = 'personaworlds_daily_return';
+const PREFERRED_TEMPLATE_KEY = 'personaworlds_preferred_template_id';
 
 function Badge({ authoredBy }: { authoredBy: Post['authored_by'] | ThreadResponse['replies'][number]['authored_by'] }) {
   const className =
@@ -96,7 +103,22 @@ function notificationTarget(notification: Notification) {
   return '';
 }
 
+function toErrorMessage(value: unknown, fallback: string) {
+  if (value instanceof Error && value.message.trim()) {
+    return value.message.trim();
+  }
+  return fallback;
+}
+
+type BattleGenerationState = {
+  battleId: string;
+  expectedReplies: number;
+  repliesCount: number;
+  status: 'RUNNING' | 'DONE' | 'TIMEOUT';
+};
+
 export default function HomePage() {
+  const toast = useToast();
   const [token, setToken] = useState<string>('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -143,6 +165,10 @@ export default function HomePage() {
   const [weeklyDigestResponse, setWeeklyDigestResponse] = useState<WeeklyDigestResponse | null>(null);
   const [weeklyDigestLoading, setWeeklyDigestLoading] = useState(false);
 
+  const [postsLoading, setPostsLoading] = useState(false);
+  const [actionLoading, setActionLoading] = useState<Record<string, boolean>>({});
+  const [battleGeneration, setBattleGeneration] = useState<BattleGenerationState | null>(null);
+
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
@@ -150,6 +176,8 @@ export default function HomePage() {
   const selectedRoom = useMemo(() => rooms.find((r) => r.id === selectedRoomId), [rooms, selectedRoomId]);
   const selectedPersona = useMemo(() => personas.find((p) => p.id === selectedPersonaId), [personas, selectedPersonaId]);
   const activeDigest = digestResponse?.digest ?? null;
+
+  const isActionLoading = (key: string) => Boolean(actionLoading[key]);
 
   useEffect(() => {
     const stored = localStorage.getItem(TOKEN_KEY);
@@ -180,7 +208,14 @@ export default function HomePage() {
     void refreshFeed(token);
     void refreshNotifications(token);
     void refreshWeeklyDigest(token);
-  }, [token]);
+
+    const preferredTemplateID = (typeof window !== 'undefined' ? localStorage.getItem(PREFERRED_TEMPLATE_KEY) || '' : '').trim();
+    if (preferredTemplateID) {
+      setSelectedFeedTemplateId(preferredTemplateID);
+      localStorage.removeItem(PREFERRED_TEMPLATE_KEY);
+      toast.info('Template preselected. Add a topic to create a battle.');
+    }
+  }, [token, toast]);
 
   useEffect(() => {
     if (!token || !selectedRoomId) {
@@ -219,7 +254,7 @@ export default function HomePage() {
       return;
     }
     const interval = window.setInterval(() => {
-      void refreshNotifications(token);
+      void refreshNotifications(token, { silent: true });
     }, 30000);
     return () => {
       window.clearInterval(interval);
@@ -256,6 +291,46 @@ export default function HomePage() {
     setPreviewQuota(null);
   }, [selectedPersonaId, selectedRoomId]);
 
+  function setActionBusy(actionKey: string, busy: boolean) {
+    setActionLoading((current) => {
+      if (busy) {
+        return { ...current, [actionKey]: true };
+      }
+      if (!current[actionKey]) {
+        return current;
+      }
+      const next = { ...current };
+      delete next[actionKey];
+      return next;
+    });
+  }
+
+  async function trackBattleGeneration(
+    authToken: string,
+    battleID: string,
+    expectedReplies: number,
+    maxWaitMs = 30000
+  ): Promise<BattlePollResult> {
+    setBattleGeneration({
+      battleId: battleID,
+      expectedReplies: Math.max(0, expectedReplies),
+      repliesCount: 0,
+      status: 'RUNNING'
+    });
+
+    const result = await pollBattleProgress(authToken, battleID, expectedReplies, { maxWaitMs });
+    setBattleGeneration({
+      battleId: battleID,
+      expectedReplies: result.latest.expected_replies,
+      repliesCount: result.latest.replies_count,
+      status: result.done ? 'DONE' : 'TIMEOUT'
+    });
+    if (result.done) {
+      setThreads((current) => ({ ...current, [battleID]: result.latest.thread }));
+    }
+    return result;
+  }
+
   async function refreshCoreData(authToken: string) {
     try {
       setLoading(true);
@@ -271,7 +346,9 @@ export default function HomePage() {
         setSelectedPersonaId(personaRes.personas[0].id);
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'could not load data');
+      const messageText = toErrorMessage(err, 'could not load data');
+      setError(messageText);
+      toast.error(messageText);
     } finally {
       setLoading(false);
     }
@@ -279,14 +356,16 @@ export default function HomePage() {
 
   async function refreshPosts(authToken: string, roomId: string) {
     try {
-      setLoading(true);
+      setPostsLoading(true);
       setError('');
       const postRes = await listRoomPosts(authToken, roomId);
       setPosts(postRes.posts);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'could not load posts');
+      const messageText = toErrorMessage(err, 'could not load posts');
+      setError(messageText);
+      toast.error(messageText);
     } finally {
-      setLoading(false);
+      setPostsLoading(false);
     }
   }
 
@@ -308,7 +387,9 @@ export default function HomePage() {
         setDigestSource('empty');
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'could not load digest');
+      const messageText = toErrorMessage(err, 'could not load digest');
+      setError(messageText);
+      toast.error(messageText);
     } finally {
       setDigestLoading(false);
     }
@@ -324,20 +405,26 @@ export default function HomePage() {
         setSelectedFeedTemplateId(response.highlight_template.template_id);
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'could not load feed');
+      const messageText = toErrorMessage(err, 'could not load feed');
+      setError(messageText);
+      toast.error(messageText);
     } finally {
       setFeedLoading(false);
     }
   }
 
-  async function refreshNotifications(authToken: string) {
+  async function refreshNotifications(authToken: string, options: { silent?: boolean } = {}) {
     try {
       setNotificationsLoading(true);
       const response = await getNotifications(authToken, 24);
       setNotifications(response.notifications || []);
       setUnreadNotifications(response.unread_count || 0);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'could not load notifications');
+      const messageText = toErrorMessage(err, 'could not load notifications');
+      setError(messageText);
+      if (!options.silent) {
+        toast.error(messageText);
+      }
     } finally {
       setNotificationsLoading(false);
     }
@@ -349,7 +436,9 @@ export default function HomePage() {
       const response = await getWeeklyDigest(authToken);
       setWeeklyDigestResponse(response);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'could not load weekly digest');
+      const messageText = toErrorMessage(err, 'could not load weekly digest');
+      setError(messageText);
+      toast.error(messageText);
     } finally {
       setWeeklyDigestLoading(false);
     }
@@ -397,6 +486,7 @@ export default function HomePage() {
     setMessage('');
 
     try {
+      setActionBusy('auth', true);
       setLoading(true);
       const shareSlug =
         isSignup && typeof window !== 'undefined' ? (localStorage.getItem(SHARE_SLUG_KEY) || '').trim() : '';
@@ -406,10 +496,15 @@ export default function HomePage() {
       if (isSignup && shareSlug) {
         localStorage.removeItem(SHARE_SLUG_KEY);
       }
-      setMessage(isSignup ? 'Account created.' : 'Logged in.');
+      const successText = isSignup ? 'Account created.' : 'Logged in.';
+      setMessage(successText);
+      toast.success(successText);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'auth failed');
+      const messageText = toErrorMessage(err, 'auth failed');
+      setError(messageText);
+      toast.error(messageText);
     } finally {
+      setActionBusy('auth', false);
       setLoading(false);
     }
   }
@@ -430,7 +525,9 @@ export default function HomePage() {
     setUnreadNotifications(0);
     setNotificationsOpen(false);
     setWeeklyDigestResponse(null);
+    setBattleGeneration(null);
     setMessage('Logged out.');
+    toast.info('Logged out.');
   }
 
   async function onCreatePersona(event: FormEvent) {
@@ -440,15 +537,21 @@ export default function HomePage() {
     }
 
     try {
+      setActionBusy('create-persona', true);
       setLoading(true);
       setError('');
       const payload = buildPersonaPayload();
       const created = await createPersona(token, payload);
       upsertPersonaInState(created);
-      setMessage(`Persona created: ${created.name}`);
+      const successText = `Persona created: ${created.name}`;
+      setMessage(successText);
+      toast.success(successText);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'could not create persona');
+      const messageText = toErrorMessage(err, 'could not create persona');
+      setError(messageText);
+      toast.error(messageText);
     } finally {
+      setActionBusy('create-persona', false);
       setLoading(false);
     }
   }
@@ -460,15 +563,21 @@ export default function HomePage() {
     }
 
     try {
+      setActionBusy('save-persona', true);
       setLoading(true);
       setError('');
       const payload = buildPersonaPayload();
       const updated = await updatePersona(token, selectedPersonaId, payload);
       upsertPersonaInState(updated);
-      setMessage(`Persona updated: ${updated.name}`);
+      const successText = `Persona updated: ${updated.name}`;
+      setMessage(successText);
+      toast.success(successText);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'could not update persona');
+      const messageText = toErrorMessage(err, 'could not update persona');
+      setError(messageText);
+      toast.error(messageText);
     } finally {
+      setActionBusy('save-persona', false);
       setLoading(false);
     }
   }
@@ -480,6 +589,7 @@ export default function HomePage() {
     }
 
     try {
+      setActionBusy('preview-voice', true);
       setLoading(true);
       setError('');
 
@@ -498,9 +608,13 @@ export default function HomePage() {
       setPreviewDrafts(preview.drafts);
       setPreviewQuota(preview.quota);
       setMessage('Voice preview generated.');
+      toast.success('Voice preview generated.');
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'could not generate preview');
+      const messageText = toErrorMessage(err, 'could not generate preview');
+      setError(messageText);
+      toast.error(messageText);
     } finally {
+      setActionBusy('preview-voice', false);
       setLoading(false);
     }
   }
@@ -512,15 +626,21 @@ export default function HomePage() {
     }
 
     try {
+      setActionBusy('create-draft', true);
       setLoading(true);
       setError('');
       const draft = await createDraft(token, selectedRoomId, selectedPersonaId);
       setPosts((current) => [draft, ...current]);
-      setMessage('AI draft post created. Review and approve to publish.');
+      const successText = 'AI draft post created. Review and approve to publish.';
+      setMessage(successText);
+      toast.success(successText);
       void refreshFeed(token);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'could not create draft');
+      const messageText = toErrorMessage(err, 'could not create draft');
+      setError(messageText);
+      toast.error(messageText);
     } finally {
+      setActionBusy('create-draft', false);
       setLoading(false);
     }
   }
@@ -531,11 +651,13 @@ export default function HomePage() {
     }
 
     try {
+      setActionBusy(`approve-${postId}`, true);
       setLoading(true);
       setError('');
       const updated = await approvePost(token, postId);
       setPosts((current) => current.map((post) => (post.id === postId ? { ...post, ...updated } : post)));
       setMessage('Draft approved and published.');
+      toast.success('Draft approved and published.');
       const digestPersonaId = updated.persona_id || selectedPersonaId;
       if (digestPersonaId) {
         void refreshDigest(token, digestPersonaId);
@@ -543,8 +665,11 @@ export default function HomePage() {
       void refreshFeed(token);
       void refreshWeeklyDigest(token);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'could not approve post');
+      const messageText = toErrorMessage(err, 'could not approve post');
+      setError(messageText);
+      toast.error(messageText);
     } finally {
+      setActionBusy(`approve-${postId}`, false);
       setLoading(false);
     }
   }
@@ -555,14 +680,20 @@ export default function HomePage() {
     }
 
     try {
+      setActionBusy(`generate-replies-${postId}`, true);
       setLoading(true);
       setError('');
       const ids = selectedPersonaId ? [selectedPersonaId] : [];
       const result = await generateReplies(token, postId, ids);
-      setMessage(`Reply jobs queued: ${result.enqueued}, skipped: ${result.skipped}.`);
+      const successText = `Reply jobs queued: ${result.enqueued}, skipped: ${result.skipped}.`;
+      setMessage(successText);
+      toast.success(successText);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'could not enqueue replies');
+      const messageText = toErrorMessage(err, 'could not enqueue replies');
+      setError(messageText);
+      toast.error(messageText);
     } finally {
+      setActionBusy(`generate-replies-${postId}`, false);
       setLoading(false);
     }
   }
@@ -573,13 +704,18 @@ export default function HomePage() {
     }
 
     try {
+      setActionBusy(`load-thread-${postId}`, true);
       setLoading(true);
       setError('');
       const thread = await getThread(token, postId);
       setThreads((current) => ({ ...current, [postId]: thread }));
+      toast.success('Thread loaded.');
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'could not load thread');
+      const messageText = toErrorMessage(err, 'could not load thread');
+      setError(messageText);
+      toast.error(messageText);
     } finally {
+      setActionBusy(`load-thread-${postId}`, false);
       setLoading(false);
     }
   }
@@ -590,6 +726,7 @@ export default function HomePage() {
     }
 
     try {
+      setActionBusy(`open-digest-thread-${thread.post_id}`, true);
       setLoading(true);
       setError('');
       if (thread.room_id && thread.room_id !== selectedRoomId) {
@@ -601,9 +738,13 @@ export default function HomePage() {
       const threadData = await getThread(token, thread.post_id);
       setThreads((current) => ({ ...current, [thread.post_id]: threadData }));
       setMessage('Digest thread loaded.');
+      toast.success('Digest thread loaded.');
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'could not load digest thread');
+      const messageText = toErrorMessage(err, 'could not load digest thread');
+      setError(messageText);
+      toast.error(messageText);
     } finally {
+      setActionBusy(`open-digest-thread-${thread.post_id}`, false);
       setLoading(false);
     }
   }
@@ -623,6 +764,7 @@ export default function HomePage() {
       return;
     }
     try {
+      setActionBusy('notifications-mark-all', true);
       const response = await markAllNotificationsRead(token);
       setUnreadNotifications(response.unread_count || 0);
       setNotifications((current) =>
@@ -631,8 +773,13 @@ export default function HomePage() {
           read_at: notification.read_at || new Date().toISOString()
         }))
       );
+      toast.success('All notifications marked as read.');
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'could not mark notifications as read');
+      const messageText = toErrorMessage(err, 'could not mark notifications as read');
+      setError(messageText);
+      toast.error(messageText);
+    } finally {
+      setActionBusy('notifications-mark-all', false);
     }
   }
 
@@ -642,6 +789,7 @@ export default function HomePage() {
     }
 
     try {
+      setActionBusy(`notification-open-${notification.id}`, true);
       const response = await markNotificationRead(token, notification.id);
       setUnreadNotifications(response.unread_count || 0);
       setNotifications((current) =>
@@ -669,7 +817,11 @@ export default function HomePage() {
         window.location.href = target;
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'could not open notification');
+      const messageText = toErrorMessage(err, 'could not open notification');
+      setError(messageText);
+      toast.error(messageText);
+    } finally {
+      setActionBusy(`notification-open-${notification.id}`, false);
     }
   }
 
@@ -679,7 +831,11 @@ export default function HomePage() {
       return;
     }
     setSelectedFeedTemplateId(cleanTemplateID);
+    if (typeof window !== 'undefined') {
+      localStorage.setItem(PREFERRED_TEMPLATE_KEY, cleanTemplateID);
+    }
     setMessage('Template selected from feed. Add a topic and create a battle.');
+    toast.info('Template selected. Add a topic and create a battle.');
   }
 
   async function onCreateBattleFromFeed() {
@@ -693,6 +849,7 @@ export default function HomePage() {
     }
 
     try {
+      setActionBusy('create-battle', true);
       setLoading(true);
       setError('');
 
@@ -704,6 +861,7 @@ export default function HomePage() {
       setPosts((current) => [created.post, ...current]);
       setFeedBattleTopic('');
       setMessage('Battle created from feed.');
+      toast.success('Battle created from feed.');
 
       if (selectedFeedTemplateId) {
         void trackEvent(
@@ -717,12 +875,58 @@ export default function HomePage() {
         ).catch(() => undefined);
       }
 
+      if (created.enqueued_replies > 0) {
+        toast.info(`Generating ${created.enqueued_replies} AI replies...`);
+        const result = await trackBattleGeneration(token, created.battle_id, created.enqueued_replies, 30000);
+        if (result.done) {
+          const doneText = `Battle ready: ${result.latest.replies_count}/${result.latest.expected_replies} replies generated.`;
+          setMessage(doneText);
+          toast.success(doneText);
+        } else {
+          const pendingText = `Still generating replies (${result.latest.replies_count}/${result.latest.expected_replies}).`;
+          setMessage(pendingText);
+          toast.info(`${pendingText} Use refresh to check again.`);
+        }
+      } else {
+        setBattleGeneration({
+          battleId: created.battle_id,
+          expectedReplies: 0,
+          repliesCount: 0,
+          status: 'DONE'
+        });
+      }
+
       void refreshFeed(token);
       void refreshWeeklyDigest(token);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'could not create battle from feed');
+      const messageText = toErrorMessage(err, 'could not create battle from feed');
+      setError(messageText);
+      toast.error(messageText);
     } finally {
+      setActionBusy('create-battle', false);
       setLoading(false);
+    }
+  }
+
+  async function onRefreshBattleGeneration() {
+    if (!token || !battleGeneration) {
+      return;
+    }
+    try {
+      setActionBusy('refresh-battle-generation', true);
+      setError('');
+      const result = await trackBattleGeneration(token, battleGeneration.battleId, battleGeneration.expectedReplies, 15000);
+      if (result.done) {
+        toast.success(`Battle is ready. ${result.latest.replies_count} replies available.`);
+      } else {
+        toast.info(`Still generating (${result.latest.replies_count}/${result.latest.expected_replies}).`);
+      }
+    } catch (err) {
+      const messageText = toErrorMessage(err, 'could not refresh battle status');
+      setError(messageText);
+      toast.error(messageText);
+    } finally {
+      setActionBusy('refresh-battle-generation', false);
     }
   }
 
@@ -740,6 +944,7 @@ export default function HomePage() {
     }
 
     try {
+      setActionBusy('publish-profile', true);
       setLoading(true);
       setError('');
       void trackEvent(
@@ -758,14 +963,43 @@ export default function HomePage() {
       if (shareLink && navigator.clipboard?.writeText) {
         await navigator.clipboard.writeText(shareLink);
         setMessage(`Public profile link copied: ${shareLink}`);
+        toast.success('Public profile link copied.');
       } else if (shareLink) {
         setMessage(`Public profile ready: ${shareLink}`);
+        toast.success('Public profile published.');
       } else {
         setMessage('Public profile published.');
+        toast.success('Public profile published.');
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'could not publish public profile');
+      const messageText = toErrorMessage(err, 'could not publish public profile');
+      setError(messageText);
+      toast.error(messageText);
     } finally {
+      setActionBusy('publish-profile', false);
+      setLoading(false);
+    }
+  }
+
+  async function onUnpublishPersona() {
+    if (!token || !selectedPersonaId) {
+      setError('select a persona first');
+      return;
+    }
+
+    try {
+      setActionBusy('unpublish-profile', true);
+      setLoading(true);
+      setError('');
+      await unpublishPersonaProfile(token, selectedPersonaId);
+      setMessage('Public profile unpublished.');
+      toast.success('Public profile unpublished.');
+    } catch (err) {
+      const messageText = toErrorMessage(err, 'could not unpublish public profile');
+      setError(messageText);
+      toast.error(messageText);
+    } finally {
+      setActionBusy('unpublish-profile', false);
       setLoading(false);
     }
   }
@@ -792,10 +1026,13 @@ export default function HomePage() {
               required
             />
             <button type="submit" disabled={loading}>
-              {isSignup ? 'Sign up' : 'Log in'}
+              <span className="button-content">
+                {isActionLoading('auth') && <Spinner />}
+                <span>{isSignup ? 'Sign up' : 'Log in'}</span>
+              </span>
             </button>
           </form>
-          <button className="link-like" onClick={() => setIsSignup((v) => !v)}>
+          <button className="link-like" onClick={() => setIsSignup((v) => !v)} disabled={loading}>
             {isSignup ? 'Already have an account? Log in' : 'Need an account? Sign up'}
           </button>
           {error && <p className="error">{error}</p>}
@@ -814,6 +1051,7 @@ export default function HomePage() {
         </div>
         <div className="header-actions">
           <button className="secondary bell-button" onClick={onToggleNotifications} disabled={notificationsLoading}>
+            {notificationsLoading && <Spinner />}
             <svg className="bell-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
               <path d="M12 22a2.25 2.25 0 0 0 2.2-1.75h-4.4A2.25 2.25 0 0 0 12 22Zm7-5.5H5.1l1.4-1.8V10a5.5 5.5 0 1 1 11 0v4.7l1.5 1.8Z" />
             </svg>
@@ -823,11 +1061,31 @@ export default function HomePage() {
           <Link className="cta-link" href="/templates">
             Templates
           </Link>
-          <button className="secondary" onClick={onSharePersona} disabled={loading || !selectedPersonaId}>
-            Share
+          <button
+            className="secondary"
+            onClick={onSharePersona}
+            disabled={loading || !selectedPersonaId || isActionLoading('publish-profile')}
+          >
+            <span className="button-content">
+              {isActionLoading('publish-profile') && <Spinner />}
+              <span>Publish & Copy</span>
+            </span>
           </button>
-          <button onClick={onCreateDraft} disabled={loading || !selectedRoomId || !selectedPersonaId}>
-            Create AI Draft
+          <button
+            className="secondary"
+            onClick={onUnpublishPersona}
+            disabled={loading || !selectedPersonaId || isActionLoading('unpublish-profile')}
+          >
+            <span className="button-content">
+              {isActionLoading('unpublish-profile') && <Spinner />}
+              <span>Unpublish</span>
+            </span>
+          </button>
+          <button onClick={onCreateDraft} disabled={loading || !selectedRoomId || !selectedPersonaId || isActionLoading('create-draft')}>
+            <span className="button-content">
+              {isActionLoading('create-draft') && <Spinner />}
+              <span>Create AI Draft</span>
+            </span>
           </button>
           <button className="secondary" onClick={logout}>
             Log out
@@ -843,8 +1101,15 @@ export default function HomePage() {
               <p className="subtle">In-app alerts only</p>
             </div>
             <div className="row">
-              <button className="secondary" onClick={onMarkAllNotificationsRead} disabled={notifications.length === 0}>
-                Mark all read
+              <button
+                className="secondary"
+                onClick={onMarkAllNotificationsRead}
+                disabled={notifications.length === 0 || isActionLoading('notifications-mark-all')}
+              >
+                <span className="button-content">
+                  {isActionLoading('notifications-mark-all') && <Spinner />}
+                  <span>Mark all read</span>
+                </span>
               </button>
               <button
                 className="secondary"
@@ -855,12 +1120,15 @@ export default function HomePage() {
                 }}
                 disabled={notificationsLoading}
               >
-                Refresh
+                <span className="button-content">
+                  {notificationsLoading && <Spinner />}
+                  <span>Refresh</span>
+                </span>
               </button>
             </div>
           </div>
 
-          {notificationsLoading && <p className="subtle">Loading notifications...</p>}
+          {notificationsLoading && <SkeletonList rows={2} />}
           {!notificationsLoading && notifications.length === 0 && <p className="subtle">You are all caught up.</p>}
 
           {!notificationsLoading && notifications.length > 0 && (
@@ -874,12 +1142,19 @@ export default function HomePage() {
                     type="button"
                     className={unread ? 'notification-item unread' : 'notification-item'}
                     onClick={() => void onNotificationClick(notification)}
+                    disabled={isActionLoading(`notification-open-${notification.id}`)}
                   >
                     <div className="row">
                       <strong>{notification.title}</strong>
                       <span className="subtle">{new Date(notification.created_at).toLocaleString()}</span>
                     </div>
                     <span>{notification.body}</span>
+                    {isActionLoading(`notification-open-${notification.id}`) && (
+                      <span className="button-content subtle">
+                        <Spinner />
+                        <span>Opening...</span>
+                      </span>
+                    )}
                     {target && <span className="subtle">Open: {target}</span>}
                   </button>
                 );
@@ -889,7 +1164,7 @@ export default function HomePage() {
         </section>
       )}
 
-      <section className="panel feed-panel stack">
+      <section id="feed" className="panel feed-panel stack">
         <div className="digest-header">
           <div>
             <h2>Home Feed</h2>
@@ -904,7 +1179,10 @@ export default function HomePage() {
             }}
             disabled={feedLoading}
           >
-            Refresh Feed
+            <span className="button-content">
+              {feedLoading && <Spinner />}
+              <span>Refresh Feed</span>
+            </span>
           </button>
         </div>
 
@@ -937,8 +1215,11 @@ export default function HomePage() {
             onChange={(event) => setFeedBattleTopic(event.target.value)}
             placeholder="Battle topic (required)"
           />
-          <button type="submit" disabled={loading || !selectedRoomId}>
-            Create Battle
+          <button type="submit" disabled={loading || !selectedRoomId || isActionLoading('create-battle')}>
+            <span className="button-content">
+              {isActionLoading('create-battle') && <Spinner />}
+              <span>Create Battle</span>
+            </span>
           </button>
         </form>
 
@@ -946,7 +1227,40 @@ export default function HomePage() {
           <p className="subtle">Selected template id: {selectedFeedTemplateId}</p>
         )}
 
-        {feedLoading && <p className="subtle">Loading feed...</p>}
+        {battleGeneration && (
+          <article className="mini-card stack">
+            <strong>Battle generation status</strong>
+            <p className="subtle">Battle: {battleGeneration.battleId}</p>
+            <p className="subtle">
+              Replies: {battleGeneration.repliesCount}/{battleGeneration.expectedReplies}
+            </p>
+            {battleGeneration.status === 'RUNNING' && (
+              <p className="button-content subtle">
+                <Spinner />
+                <span>Generating...</span>
+              </p>
+            )}
+            {battleGeneration.status === 'TIMEOUT' && (
+              <div className="row">
+                <span className="subtle">Still pending. Try refresh.</span>
+                <button
+                  type="button"
+                  className="secondary"
+                  onClick={() => void onRefreshBattleGeneration()}
+                  disabled={isActionLoading('refresh-battle-generation')}
+                >
+                  <span className="button-content">
+                    {isActionLoading('refresh-battle-generation') && <Spinner />}
+                    <span>Refresh Status</span>
+                  </span>
+                </button>
+              </div>
+            )}
+            {battleGeneration.status === 'DONE' && <span className="message">Done.</span>}
+          </article>
+        )}
+
+        {feedLoading && <SkeletonList rows={3} />}
         {!feedLoading && feedItems.length === 0 && (
           <div className="mini-card stack empty-feed-state">
             <p className="subtle">No feed items yet. Create a battle to start momentum.</p>
@@ -1041,11 +1355,14 @@ export default function HomePage() {
             }}
             disabled={weeklyDigestLoading}
           >
-            Refresh Weekly
+            <span className="button-content">
+              {weeklyDigestLoading && <Spinner />}
+              <span>Refresh Weekly</span>
+            </span>
           </button>
         </div>
 
-        {weeklyDigestLoading && <p className="subtle">Loading weekly digest...</p>}
+        {weeklyDigestLoading && <SkeletonList rows={2} />}
         {!weeklyDigestLoading &&
           (!weeklyDigestResponse || !weeklyDigestResponse.exists || weeklyDigestResponse.digest.items.length === 0) && (
             <p className="subtle">No missed battles found this week yet.</p>
@@ -1093,7 +1410,10 @@ export default function HomePage() {
             }}
             disabled={digestLoading || !selectedPersonaId}
           >
-            Refresh Digest
+            <span className="button-content">
+              {digestLoading && <Spinner />}
+              <span>Refresh Digest</span>
+            </span>
           </button>
         </div>
 
@@ -1148,7 +1468,7 @@ export default function HomePage() {
       </section>
 
       <section className="grid">
-        <aside className="panel stack">
+        <aside id="profile" className="panel stack">
           <h2>Personas</h2>
           <label>
             Active Persona
@@ -1223,19 +1543,34 @@ export default function HomePage() {
               />
             </label>
             <div className="row">
-              <button type="submit" disabled={loading}>
-                Create Persona
+              <button type="submit" disabled={loading || isActionLoading('create-persona')}>
+                <span className="button-content">
+                  {isActionLoading('create-persona') && <Spinner />}
+                  <span>Create Persona</span>
+                </span>
               </button>
-              <button type="button" className="secondary" onClick={onSavePersona} disabled={loading || !selectedPersonaId}>
-                Save Persona
+              <button
+                type="button"
+                className="secondary"
+                onClick={onSavePersona}
+                disabled={loading || !selectedPersonaId || isActionLoading('save-persona')}
+              >
+                <span className="button-content">
+                  {isActionLoading('save-persona') && <Spinner />}
+                  <span>Save Persona</span>
+                </span>
               </button>
-              <button type="button" onClick={onPreviewVoice} disabled={loading || !selectedRoomId}>
-                Preview Voice
+              <button type="button" onClick={onPreviewVoice} disabled={loading || !selectedRoomId || isActionLoading('preview-voice')}>
+                <span className="button-content">
+                  {isActionLoading('preview-voice') && <Spinner />}
+                  <span>Preview Voice</span>
+                </span>
               </button>
             </div>
           </form>
 
           <div className="subtle">
+            {personas.length === 0 && <p>No personas yet. Create your first persona to start posting.</p>}
             {personas.map((persona) => (
               <div key={persona.id} className="mini-card">
                 <strong>{persona.name}</strong>
@@ -1250,9 +1585,10 @@ export default function HomePage() {
           </div>
         </aside>
 
-        <section className="panel stack">
+        <section id="rooms" className="panel stack">
           <h2>Rooms</h2>
           <div className="room-list">
+            {rooms.length === 0 && <p className="subtle">No rooms available yet. Run seed data to populate rooms.</p>}
             {rooms.map((room) => (
               <button
                 key={room.id}
@@ -1289,7 +1625,10 @@ export default function HomePage() {
 
           <h2>Posts</h2>
           <div className="stack">
-            {posts.map((post) => {
+            {postsLoading && <SkeletonList rows={3} />}
+            {!postsLoading && posts.length === 0 && <p className="subtle">No battles or posts in this room yet.</p>}
+            {!postsLoading &&
+              posts.map((post) => {
               const thread = threads[post.id];
               return (
                 <article id={`post-${post.id}`} key={post.id} className="post-card">
@@ -1302,16 +1641,32 @@ export default function HomePage() {
 
                   <div className="row">
                     {post.status === 'DRAFT' ? (
-                      <button onClick={() => onApprove(post.id)} disabled={loading}>
-                        Approve & Publish
+                      <button onClick={() => onApprove(post.id)} disabled={loading || isActionLoading(`approve-${post.id}`)}>
+                        <span className="button-content">
+                          {isActionLoading(`approve-${post.id}`) && <Spinner />}
+                          <span>Approve & Publish</span>
+                        </span>
                       </button>
                     ) : (
-                      <button onClick={() => onGenerateReplies(post.id)} disabled={loading}>
-                        Generate Replies
+                      <button
+                        onClick={() => onGenerateReplies(post.id)}
+                        disabled={loading || isActionLoading(`generate-replies-${post.id}`)}
+                      >
+                        <span className="button-content">
+                          {isActionLoading(`generate-replies-${post.id}`) && <Spinner />}
+                          <span>Generate Replies</span>
+                        </span>
                       </button>
                     )}
-                    <button className="secondary" onClick={() => onLoadThread(post.id)} disabled={loading}>
-                      Load Thread
+                    <button
+                      className="secondary"
+                      onClick={() => onLoadThread(post.id)}
+                      disabled={loading || isActionLoading(`load-thread-${post.id}`)}
+                    >
+                      <span className="button-content">
+                        {isActionLoading(`load-thread-${post.id}`) && <Spinner />}
+                        <span>Load Thread</span>
+                      </span>
                     </button>
                     <button className="secondary" onClick={() => onOpenBattleCard(post.id)} disabled={loading}>
                       View Battle Card
