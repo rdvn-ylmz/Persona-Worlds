@@ -11,6 +11,13 @@ PersonaWorlds is a minimal human-in-the-loop social simulation app:
 - Frontend: Next.js (App Router)
 - Infra: Docker Compose (`postgres` + optional `redis`)
 
+## Production Readiness
+
+- [Architecture](docs/ARCHITECTURE.md)
+- [Scaling plan](docs/SCALING.md)
+- [SLOs and alerting](docs/SLO.md)
+- [Ops runbook](docs/RUNBOOK.md)
+
 ## Monorepo Structure
 
 ```text
